@@ -540,6 +540,52 @@ sessions — every other commit is authored by Claude.
         "research. Other projects will have different splits."
     )
 
+    st.markdown("## Scientific accountability")
+    st.markdown("""
+**Who is responsible for the scientific content.** Eduardo Siman. Claude
+4.7 produced the code and documentation, but a language model does not
+bear scientific responsibility; a human does. Any figure, statistic, or
+claim shown in this app has been published under Eduardo's name (via a
+GitHub repository he owns and a Streamlit app he deployed) and should
+be cited that way. If any of it is wrong, the responsibility is his,
+not the AI's.
+
+**Known failure modes of AI-assisted scientific code.** These apply to
+*all* LLM-authored code, including what's in this repo. Readers should
+assume they *may* be present until independently verified:
+
+- **Wrong formulas cited under right-looking references.** LLMs often
+  select the correct reference but implement a subtly different
+  formula. The bootstrap-block-length choice, the Welch-Satterthwaite
+  df formula, and the phase-octant mapping in this app have all been
+  spot-checked against the cited sources but not exhaustively
+  audited.
+- **Right code, wrong interpretation.** The app currently states
+  *"R² = 0.15 supports the MJO hypothesis"*. An independent reading
+  might conclude *"R² = 0.15 means the signal-to-noise is so low that
+  no seasonal-scale mechanism will be resolvable from 120 days of
+  data"*. Both readings follow from the same number; the AI picked
+  one. Readers should evaluate both.
+- **Plausible but unverifiable statements.** The method notes include
+  phrases like *"stippling is a pointwise test and does not apply
+  field-significance correction (Wilks 2016)"*. That statement is
+  correct; whether the app's stippling is *calibrated* under the null
+  for this specific dataset is not verified. A Monte-Carlo field
+  significance check has not been performed.
+- **Confident but stale numbers.** Reference r-values in the app
+  (e.g. Abby's monthly AO-T2m r = 0.561) were transcribed by Claude
+  from Eduardo's prompt. A typo in the original prompt would propagate.
+
+**Recommended validation before citing.** (1) Independently re-compute
+the key numerics (`R²`, composite means, bootstrap CIs) in a separate
+notebook that does not use this code. (2) Have a domain expert
+(Prof. Nolan; Prof. Becker on MJO questions specifically) read the
+method notes and confirm they describe what is actually being computed.
+(3) Run a sensitivity analysis — remove November, remove March, drop
+each index in turn from the regression — and confirm conclusions are
+robust.
+""")
+
 with tab_rc:
     qp_set(tab="compass")
     import matplotlib.pyplot as _plt
