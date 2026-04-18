@@ -369,6 +369,72 @@ Landed on `main` as commit [`4fb19f4`](https://github.com/monksealseal/winter252
 Two files changed (`app.py`, `indices.py`); 137 insertions, 37 deletions.
 """)
 
+    with st.expander("**Session 1, Phase 2.1 — publication-quality retrofit + Research compass**",
+                     expanded=False):
+        st.markdown("""
+**Prompts by Eduardo** (paraphrased):
+1. *"What else can we build that would help the group with their
+   research?"*
+2. After Claude listed options: *"Whatever we do it has to be
+   publication quality. It has to be something that Prof. Emily Becker
+   would look at and be able to understand. It has to be grounded in
+   established scientific methods and it needs to explain what it is
+   doing."*
+3. Eduardo then provided group-lead **Tori's project questionnaire**
+   (her research questions, methods, and a-priori hypothesis about
+   MJO phase 7-8 → eastern-US cold). Eduardo: *"Let's focus on Tori's
+   questions — she is the group lead."*
+
+**What Claude 4.7 did** (Eduardo wrote no code during this phase):
+
+*New modules:*
+
+- **`stats.py`** — four helpers: `effective_n()` (lag-1-AR adjustment,
+  Bretherton et al. 1999), `block_bootstrap_corr()` (moving-block
+  bootstrap for correlation CIs, Künsch 1989 / Wilks 2011), plus a
+  `welch_t_composite()` and `corr_map_t_significance()` pair for
+  pixel-wise significance with Welch-Satterthwaite degrees of freedom.
+- **`plots.py`** — a single `make_map()` factory. PlateCarree cartopy
+  axes, Natural Earth 50 m coastlines / borders / states, diverging
+  colormap centered on zero for anomalies, journal-style caption
+  block, optional contour overlay, stippling, and analysis-box
+  highlights.
+- **`requirements.txt`** and **`packages.txt`** — cartopy, matplotlib,
+  and the apt dependencies for Streamlit Cloud's build.
+
+*Tab retrofits:*
+
+- **Tab 1 (This Winter)** — cartopy map with a caption that names
+  the climatology base period and flags coverage caveats.
+- **Tab 3 (Composites & Correlations)** — composite difference and
+  correlation maps redrawn with cartopy, Welch's-t stippling on
+  composites, `n_eff`-adjusted t-test on correlations, and a new
+  bootstrap 95 % CI on the SE-US box-time-series correlation.
+  Absolute-phase composites get Z500 contour overlays. An
+  "About this analysis" expander lists formulas and references inline.
+- **Tab 4** — renamed *Dataset Inspector* → *Methods & Data*. Full
+  methods section, data-provenance table, known-limitations section,
+  and a references bibliography.
+
+*New tab:*
+
+- **🧭 Research compass** — purpose-built panels for each of Tori's
+  five primary questions (Q1 cold-event detection, Q2 MJO phase × lag
+  heatmap, Q3 MJO phase 7-8 lagged Z500 composite, Q4 MJO × ENSO
+  conditional 2×2, Q5 OLS multiple regression of FL T2m on AO+NAO+PNA+ONI).
+  Deferred questions Q6 (La Niña analog search), Q7 (Rossby wave train
+  Hovmöller), and Q8 (250 mb jet) are enumerated with the specific
+  data-scope each would require.
+
+Landed on `main` as two commits:
+[`fa77041`](https://github.com/monksealseal/winter2526-explorer/commit/fa77041)
+(main feature) and
+[`42c03ec`](https://github.com/monksealseal/winter2526-explorer/commit/42c03ec)
+(a NameError bug fix Eduardo caught by loading the deployed app and
+reporting the traceback; Claude fixed it within the same session).
+Net diff for Phase 2.1: ~1200 insertions, ~150 deletions across 5 files.
+""")
+
 with tab_rc:
     qp_set(tab="compass")
     import matplotlib.pyplot as _plt
