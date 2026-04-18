@@ -306,6 +306,40 @@ detail, a methods list with citations, and a How-to-cite block.
   Code's default system prompt.
 """)
 
+    st.markdown("## Chronology, step by step")
+
+    with st.expander("**Day 0 — before any AI session (Eduardo Siman, solo)**", expanded=False):
+        st.markdown("""
+All of the following existed in the repository *before* Claude was
+invoked, and all of it was written by Eduardo Siman (with credit to the
+standard scientific-Python ecosystem — `xarray`, `numpy`, `pandas`,
+`scipy`, `streamlit`, `plotly` — that the code depends on):
+
+- **Repository scaffold.** `app.py`, `indices.py`, `preprocess.py`,
+  `requirements.txt`, `README.md`, `.streamlit/config.toml`, `.gitignore`.
+- **Data-preprocessing pipeline** (`preprocess.py`). Downloaded ERA5
+  reanalysis fields (2-m temperature, 500 mb geopotential height), CPC
+  Global PRCP V1.0 precipitation, plus NOAA CPC teleconnection indices
+  (AO, NAO, PNA, QBO, ONI). Regridded precipitation to the ERA5 0.25°
+  grid; computed daily anomalies against variable-specific climatology
+  base periods (ERA5 T2m 2016-2024, 9 yr; Z500 1994-2020, 27 yr).
+- **Data cubes.** `data/cube_winter.nc` (42.7 MB, 151 days × 111 lat ×
+  233 lon covering 22.5-50 °N / -125 to -67 °E), `data/cube_climo_djf.nc`
+  (0.2 MB climatology bundle).
+- **Teleconnection index files.** `data/indices/{ao.csv, nao.csv,
+  pna.txt, qbo.csv, oni.txt}` with their respective parsers in
+  `indices.py`.
+- **First version of `app.py`.** Four tabs ("This Winter", "Indices",
+  "Composites & Correlations", "Dataset Inspector") with daily plots,
+  a correlation/composite panel using parametric-p significance only,
+  and a data-caveats tab. Plotly heatmaps, no cartopy. ~600 lines.
+
+Git blame for every file dated before the AI sessions shows Eduardo as
+the sole author. The initial commit is
+[`62a5817`](https://github.com/monksealseal/winter2526-explorer/commit/62a5817)
+(*"Initial Winter 25-26 Explorer"*), authored Apr 18 2026 03:18 UTC.
+""")
+
 with tab_rc:
     qp_set(tab="compass")
     import matplotlib.pyplot as _plt
