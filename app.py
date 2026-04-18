@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from scipy import stats as scistats
 import streamlit as st
 import xarray as xr
 
@@ -392,7 +393,7 @@ with tab_rc:
                 cov = sigma2 * np.linalg.inv(X_arr.T @ X_arr)
                 se_coef = np.sqrt(np.diag(cov))
                 t_coef = beta / se_coef
-                p_coef = 2.0 * (1.0 - stats.t.cdf(np.abs(t_coef), df=n_obs - k_reg))
+                p_coef = 2.0 * (1.0 - scistats.t.cdf(np.abs(t_coef), df=n_obs - k_reg))
             except np.linalg.LinAlgError:
                 se_coef = np.full_like(beta, np.nan)
                 t_coef = np.full_like(beta, np.nan)
@@ -852,7 +853,7 @@ with tab2:
 
             if abs(1 - r**2) > 1e-10 and n_eff > 2:
                 t_s = r * np.sqrt(n_eff - 2) / np.sqrt(1 - r**2)
-                p = 2 * (1 - stats.t.cdf(abs(t_s), df=n_eff - 2))
+                p = 2 * (1 - scistats.t.cdf(abs(t_s), df=n_eff - 2))
             else:
                 p = np.nan
             rows.append({
@@ -952,7 +953,7 @@ with tab3:
         r_sig_mask = corr_map_t_significance(r_map, n_eff, alpha=BOOTSTRAP_ALPHA)
         # critical |r| for the caption (two-sided t at n_eff-2 df)
         if n_eff > 2:
-            _tc = stats.t.ppf(1 - BOOTSTRAP_ALPHA/2, df=n_eff - 2)
+            _tc = scistats.t.ppf(1 - BOOTSTRAP_ALPHA/2, df=n_eff - 2)
             r_crit = float(_tc / np.sqrt(_tc**2 + n_eff - 2))
         else:
             r_crit = 1.0
