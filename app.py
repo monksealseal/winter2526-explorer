@@ -18,7 +18,7 @@ from scipy import stats
 import streamlit as st
 import xarray as xr
 
-from indices import load_all_indices
+from indices import load_all_indices, to_monthly
 
 DATA_DIR = Path(__file__).parent / "data"
 CUBE_PATH = DATA_DIR / "cube_winter.nc"
@@ -207,6 +207,13 @@ with tab1:
         st.warning(f"⚠️ Only {valid_days} valid days in {month_label} for {field_t1}. "
                    "See Dataset Inspector for coverage.")
 
+    if field_t1 == "z500_anom":
+        st.caption(
+            "**Reading Z500 anomaly maps:** red = positive anomaly (ridging/high pressure), "
+            "blue = negative anomaly (troughing/low pressure). A PNA-positive pattern shows an "
+            "Alaska ridge with an eastern-US trough."
+        )
+
     c_a, c_b = st.columns(2)
     c_a.metric("SE-US box mean", f"{float(box_mean(monthly_mean, SE_US_BOX)):.2f}")
     c_b.metric("Florida box mean", f"{float(box_mean(monthly_mean, FLORIDA_BOX)):.2f}")
@@ -214,6 +221,17 @@ with tab1:
 with tab2:
     c_l, c_r = st.columns([1, 3])
     with c_l:
+        view_default = qp_get("view", "daily", str)
+        view_default = view_default if view_default in ("daily", "monthly") else "daily"
+        view_mode = st.radio(
+            "View", ["Daily", "Monthly"],
+            index=0 if view_default == "daily" else 1, key="idx_view",
+            help="Monthly aggregates indices and SE-US T2m anomaly to month-start means "
+                 "(≥15 valid days required). Matches the methodology behind Abby's reference "
+                 "r-values (slides 38/46/47)."
+        )
+        is_monthly = view_mode == "Monthly"
+
         default_picks = [p for p in qp_get("idx", "ao,nao", str).split(",") if p in available_indices]
         if not default_picks:
             default_picks = available_indices[:2]
@@ -222,6 +240,7 @@ with tab2:
         overlay = st.checkbox("Overlay SE-US T2m anomaly",
                               value=qp_get("overlay", "1", str) == "1", key="overlay")
     qp_set(tab="indices",
+           view="monthly" if is_monthly else "daily",
            idx=",".join(picks) if picks else None,
            overlay="1" if overlay else "0")
 
@@ -229,8 +248,10 @@ with tab2:
         c_r.info("Select at least one index to display.")
     else:
         cube_time = cube.time.values
-        t2m_se = box_mean(cube.t2m_anom, SE_US_BOX).to_series()
+        t2m_se_daily = box_mean(cube.t2m_anom, SE_US_BOX).to_series()
         lo_str, hi_str = str(cube_time.min())[:10], str(cube_time.max())[:10]
+        t2m_se_monthly = to_monthly(t2m_se_daily)
+        t2m_overlay = t2m_se_monthly if is_monthly else t2m_se_daily
 
         fig = make_subplots(rows=len(picks), cols=1, shared_xaxes=True, vertical_spacing=0.05,
                            subplot_titles=[INDEX_META[p]["label"] for p in picks])
@@ -238,61 +259,110 @@ with tab2:
             s = get_series(indices, pick)
             if s.empty: continue
             s_win = s.loc[lo_str:hi_str]
-            pos, neg = s_win.where(s_win >= 0), s_win.where(s_win < 0)
-            fig.add_trace(go.Scatter(x=s_win.index, y=pos.values, mode="lines",
-                                     line=dict(color="crimson", width=1.5), name="≥ 0",
-                                     legendgroup="pos", showlegend=(i == 1)), row=i, col=1)
-            fig.add_trace(go.Scatter(x=s_win.index, y=neg.values, mode="lines",
-                                     line=dict(color="royalblue", width=1.5), name="< 0",
-                                     legendgroup="neg", showlegend=(i == 1)), row=i, col=1)
+            if is_monthly and INDEX_META[pick]["cadence"] == "daily":
+                s_win = to_monthly(s_win)
+            s_win = s_win.dropna()
+            if s_win.empty:
+                continue
+
+            if is_monthly:
+                colors = ["crimson" if v >= 0 else "royalblue" for v in s_win.values]
+                fig.add_trace(go.Bar(
+                    x=s_win.index, y=s_win.values, marker_color=colors,
+                    name=INDEX_META[pick]["label"], showlegend=False,
+                    hovertemplate="%{x|%b %Y}<br>%{y:+.3f}<extra></extra>"
+                ), row=i, col=1)
+            else:
+                pos, neg = s_win.where(s_win >= 0), s_win.where(s_win < 0)
+                fig.add_trace(go.Scatter(x=s_win.index, y=pos.values, mode="lines",
+                                         line=dict(color="crimson", width=1.5), name="≥ 0",
+                                         legendgroup="pos", showlegend=(i == 1)), row=i, col=1)
+                fig.add_trace(go.Scatter(x=s_win.index, y=neg.values, mode="lines",
+                                         line=dict(color="royalblue", width=1.5), name="< 0",
+                                         legendgroup="neg", showlegend=(i == 1)), row=i, col=1)
             fig.add_hline(y=0, line=dict(color="black", width=0.4, dash="dash"), row=i, col=1)
             fig.update_yaxes(title_text=INDEX_META[pick]["unit"], row=i, col=1)
 
-        if overlay:
-            fig.add_trace(go.Scatter(x=t2m_se.index, y=t2m_se.values, mode="lines",
-                                     line=dict(color="black", width=1.2, dash="dot"),
-                                     name="SE-US T2m anom", showlegend=True), row=1, col=1)
+        if overlay and not t2m_overlay.dropna().empty:
+            t_plot = t2m_overlay.dropna()
+            fig.add_trace(go.Scatter(
+                x=t_plot.index, y=t_plot.values,
+                mode="lines+markers" if is_monthly else "lines",
+                line=dict(color="black", width=1.2, dash="dot"),
+                name="SE-US T2m anom", showlegend=True), row=1, col=1)
 
         fig.update_layout(height=max(400, 180 * len(picks)), hovermode="x unified",
                          margin=dict(l=60, r=40, t=60, b=40))
         with c_r:
             st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown("### Daily correlations with SE-US T2m anomaly")
+        cadence_label = "Monthly" if is_monthly else "Daily"
+        r_col = f"r (this app, {cadence_label.lower()})"
+        st.markdown(f"### {cadence_label} correlations with SE-US T2m anomaly")
         rows = []
+        skipped = []
         for pick in picks:
             s = get_series(indices, pick)
             if s.empty: continue
-            s_a = align_index_to_cube(s, cube_time)
-            t_a = t2m_se.reindex(pd.DatetimeIndex([pd.Timestamp(t).normalize() for t in cube_time]))
-            common = pd.concat([s_a, t_a], axis=1, keys=["idx", "t2m"]).dropna()
-            if len(common) < 10:
-                continue
-            r = common["idx"].corr(common["t2m"])
-            n = len(common)
-            n_eff = effective_n(common["idx"].values) if INDEX_META[pick]["cadence"] == "daily" else n
+            ref = REFERENCE_R.get(f"{pick}_t2m")
+            ref_r = f"{ref['r']:+.3f}" if ref else "—"
+            ref_src = ref["source"] if ref else "—"
+
+            if is_monthly:
+                if INDEX_META[pick]["cadence"] == "daily":
+                    s_m = to_monthly(s.loc[lo_str:hi_str])
+                else:
+                    s_m = s.loc[lo_str:hi_str].resample("MS").mean()
+                common = pd.concat([s_m, t2m_se_monthly], axis=1,
+                                   keys=["idx", "t2m"]).dropna()
+                n = len(common)
+                if n < 3:
+                    skipped.append(f"{INDEX_META[pick]['label']} (only {n} month{'s' if n != 1 else ''} of overlap)")
+                    continue
+                r = common["idx"].corr(common["t2m"])
+                n_eff = n
+            else:
+                s_a = align_index_to_cube(s, cube_time)
+                t_a = t2m_se_daily.reindex(
+                    pd.DatetimeIndex([pd.Timestamp(t).normalize() for t in cube_time]))
+                common = pd.concat([s_a, t_a], axis=1, keys=["idx", "t2m"]).dropna()
+                if len(common) < 10:
+                    skipped.append(f"{INDEX_META[pick]['label']} (only {len(common)} overlapping days)")
+                    continue
+                r = common["idx"].corr(common["t2m"])
+                n = len(common)
+                n_eff = effective_n(common["idx"].values) if INDEX_META[pick]["cadence"] == "daily" else n
+
             if abs(1 - r**2) > 1e-10 and n_eff > 2:
                 t_s = r * np.sqrt(n_eff - 2) / np.sqrt(1 - r**2)
                 p = 2 * (1 - stats.t.cdf(abs(t_s), df=n_eff - 2))
             else:
                 p = np.nan
-            ref_key = f"{pick}_t2m"
-            ref = REFERENCE_R.get(ref_key)
             rows.append({
                 "Index": INDEX_META[pick]["label"],
-                "r (this app, daily)": f"{r:+.3f}",
+                r_col: f"{r:+.3f}",
                 "n": n, "n_eff": n_eff,
                 "p (n_eff adj)": f"{p:.3f}" if not np.isnan(p) else "—",
-                "Group ref r": f"{ref['r']:+.3f}" if ref else "—",
-                "Group ref source": ref["source"] if ref else "—",
+                "Group ref r": ref_r,
+                "Group ref source": ref_src,
             })
         if rows:
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-            st.caption(
-                "**Why might our r differ from the group's?** "
-                "Abby's r=0.561 is labeled *monthly* AO↔T2m. This app computes daily correlations. "
-                "Daily values are noisier, so a smaller r is expected. Reconcile methodology before citing."
-            )
+            if is_monthly:
+                st.caption(
+                    "**Monthly correlations** use month-start means (≥15 valid days per month). "
+                    "This matches the cadence behind Abby's reference r-values, so magnitudes should be "
+                    "comparable — expect larger |r| than the daily view because weather noise averages out. "
+                    "Caveat: only ~4 winter months of overlap means n is tiny and p-values are weak."
+                )
+            else:
+                st.caption(
+                    "**Daily correlations.** Abby's reference r=0.561 is labeled *monthly*; daily values are "
+                    "noisier so a smaller r is expected. Switch the view above to **Monthly** to reconcile "
+                    "with the group's methodology before citing."
+                )
+        if skipped:
+            st.caption("Skipped (insufficient overlap): " + "; ".join(skipped))
 
 with tab3:
     c_ctrl, c_maps = st.columns([1, 3])
@@ -316,7 +386,12 @@ with tab3:
         th_default = qp_get("thmode", "sign", str)
         th_mode = st.radio("Threshold",
             ["Sign (> 0 vs < 0)", "±σ standardized"],
-            index=0 if th_default == "sign" else 1, key="c_thmode")
+            index=0 if th_default == "sign" else 1, key="c_thmode",
+            help="Composite difference = (positive index days) − (negative index days). "
+                 "Sign: split on 0. ±σ: require |index| > threshold·σ to enter each group — "
+                 "stricter but smaller samples. To read **negative-phase** impacts "
+                 "(e.g. AO<0 cold outbreaks), look for **blue** in the difference map: field is "
+                 "lower during positive index, i.e. **higher during negative index**.")
         if th_mode.startswith("±"):
             threshold = st.slider("σ threshold", 0.25, 2.5,
                                  qp_get("th", 1.0, float), step=0.25, key="c_th")
@@ -366,8 +441,11 @@ with tab3:
         with c_maps:
             a, b = st.columns(2)
             with a:
-                st.markdown(f"**Composite difference** (positive − negative {INDEX_META[idx_pick]['label']})")
-                st.caption(f"threshold: {th_label} · n(+) = {comp['n_pos']} · n(−) = {comp['n_neg']} · lag = {lag:+d}d")
+                st.markdown(f"**Composite difference** — (positive {INDEX_META[idx_pick]['label']} days) − (negative {INDEX_META[idx_pick]['label']} days)")
+                st.caption(
+                    f"threshold: {th_label} · n(+) = {comp['n_pos']} · n(−) = {comp['n_neg']} · lag = {lag:+d}d · "
+                    "red = field higher on positive-index days; blue = field higher on negative-index days."
+                )
                 if comp["n_pos"] < 5 or comp["n_neg"] < 5:
                     st.warning(f"Sample size too small (n+={comp['n_pos']}, n-={comp['n_neg']}).")
                 dmax = float(np.nanmax(np.abs(comp["diff"]))) if np.isfinite(comp["diff"]).any() else 1.0
@@ -403,10 +481,18 @@ with tab3:
         st.metric("SE-US mean correlation", f"{float(box_mean(se_r_da, SE_US_BOX)):+.3f}")
 
         with st.expander("Absolute-phase composites (matches Juliette's notebook style)"):
+            st.caption(
+                f"Mean {VAR_META[field_pick]['label']} on days when "
+                f"{INDEX_META[idx_pick]['label']} is in its **positive** vs **negative** phase. "
+                "Use the negative-phase panel to read the pattern directly (e.g. for AO<0 "
+                "cold-air outbreaks), without having to invert the difference map."
+            )
+            pos_lbl = f"positive {INDEX_META[idx_pick]['label']} ({comp['n_pos']} days)"
+            neg_lbl = f"negative {INDEX_META[idx_pick]['label']} ({comp['n_neg']} days)"
             aa, bb = st.columns(2)
             abs_meta = VAR_META[field_pick]
-            for panel, data, lbl in [(aa, comp["mean_pos"], f"positive ({comp['n_pos']} days)"),
-                                      (bb, comp["mean_neg"], f"negative ({comp['n_neg']} days)")]:
+            for panel, data, lbl in [(aa, comp["mean_pos"], pos_lbl),
+                                      (bb, comp["mean_neg"], neg_lbl)]:
                 with panel:
                     if np.isfinite(data).any():
                         vv = max(float(np.nanmax(np.abs(data))), 1e-6)

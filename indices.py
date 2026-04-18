@@ -6,6 +6,20 @@ import numpy as np
 import pandas as pd
 
 
+def to_monthly(series: pd.Series, min_days: int = 15) -> pd.Series:
+    """Aggregate a daily-cadence index series to month-start means.
+
+    Months with fewer than ``min_days`` valid observations become NaN so that
+    downstream correlations aren't biased by partial months (common at the
+    edges of the analysis window, e.g. December 2025 precip).
+    """
+    if series.empty:
+        return pd.Series(dtype=float)
+    monthly = series.resample("MS").mean()
+    counts = series.resample("MS").count()
+    return monthly.where(counts >= min_days)
+
+
 def parse_daily_ao_nao_pna(path) -> pd.Series:
     df = pd.read_csv(path, sep=r"\s+", header=None,
                      names=["Year", "Month", "Day", "Value"],
