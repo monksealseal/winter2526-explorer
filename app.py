@@ -238,7 +238,8 @@ st.caption(
 
 MJO_LOADED = "mjo" in indices
 
-tab_rc, tab1, tab2, tab3, tab4 = st.tabs([
+tab_about, tab_rc, tab1, tab2, tab3, tab4 = st.tabs([
+    "📜 About & authorship",
     "🧭 Research compass",
     "This Winter",
     "Indices",
@@ -249,6 +250,37 @@ tab_rc, tab1, tab2, tab3, tab4 = st.tabs([
 # ==================================================================
 # Tab RC: Research Compass — purpose-built panels for Tori's proposal
 # ==================================================================
+with tab_about:
+    qp_set(tab="about")
+    st.header("📜 About this app — authorship, methods, and AI assistance")
+
+    st.markdown("""
+This Streamlit application was built collaboratively by a human and an AI
+assistant. Because academic norms for AI-assisted research software are
+still being established (as of April 2026), this page documents the
+division of labor transparently so readers, reviewers, and instructors
+can weigh the evidence produced here appropriately.
+
+**Human author.** Eduardo Siman (University of Miami RSMAS, MPO-551
+General Circulation, Spring 2026). Contributed: the initial repository
+and data-preprocessing pipeline, strategic direction and prompts,
+research context (Group 2 Subgroup A's proposal, group-lead Tori's
+questions), quality standards, manual data fetches where the AI sandbox
+was firewalled, and browser-based testing with bug reports. Eduardo
+**did not write any of the Python code added during the AI-assisted
+development sessions**.
+
+**AI assistant.** Claude 4.7 (model ID `claude-opus-4-7`), operated via
+Anthropic's Claude Code CLI harness. Contributed: all application code
+added during these sessions (in `app.py`, `indices.py`, `stats.py`, and
+`plots.py`), selection of statistical methods and their primary-literature
+references, figure design, inline documentation text, scientific
+interpretation of the numeric outputs, and bug fixes.
+
+The rest of this page gives a step-by-step chronology, data-provenance
+detail, a methods list with citations, and a How-to-cite block.
+""")
+
 with tab_rc:
     qp_set(tab="compass")
     import matplotlib.pyplot as _plt
