@@ -88,7 +88,7 @@ PROVENANCE = [
      "period": "2025-11-01 → 2026-02-28", "climatology": Z500_CLIMO_BASE,
      "resolution": "0.25° global", "doi_ref": "Hersbach et al. 2020, QJRMS 146, 1999-2049"},
     {"variable": "precip", "source": PRECIP_SOURCE,
-     "period": "2026-01-01 → 2026-03-31", "climatology": "— (not anomalized here)",
+     "period": "2025-11-01 → 2026-03-31", "climatology": "— (not anomalized here)",
      "resolution": "0.5° native → 0.25° interpolated", "doi_ref": "Xie et al. 2007, J. Hydromet. 8, 607-626"},
     {"variable": "AO, NAO, PNA", "source": "NOAA CPC daily teleconnection indices",
      "period": "daily, 1950-present", "climatology": "CPC normalisation",
@@ -482,6 +482,66 @@ Landed as commits
 (Eduardo's data commit). The data commit is the *only* commit on this
 repo authored by `Eduardo Siman <esiman@msn.com>` during the AI-assisted
 sessions — every other commit is authored by Claude.
+""")
+
+    with st.expander("**Session 2, Phase 3 — D3: backfill CPC precip Nov-Dec 2025**",
+                     expanded=False):
+        st.markdown("""
+**Prompt context by Eduardo** (Session 2). After the Phase 2.2 Research
+Compass + About tab work landed on `main`, Eduardo downloaded a fresh
+bundle of raw ERA5/CPC files to a local folder (*New Downloaded Files*)
+and asked Claude to inventory what was new and integrate it. Scope was
+negotiated through a pre-flight report and a multi-select question tool
+("pick D1-D6"). Eduardo picked the full slate and selected a risk-
+ascending sequence, starting with **D3 — backfill precipitation for
+Nov-Dec 2025**.
+
+**Precise scope of this commit (D3 only):**
+
+1. Rebuild `data/cube_winter.nc` so that the `precip` variable covers
+   the full Nov 1 2025 - Mar 31 2026 window (151 days), instead of
+   only Jan 1 - Mar 31 2026 (90 days with 61 days of NaN in the
+   Nov-Dec portion).
+2. The data source for the new 61 days is `precip.2025.nc` from the
+   CPC Global PRCP V1.0 gauge analysis (NOAA PSL download), bundled
+   inside the new *Gen Circ Group 2 Subgroup 2* zip-001 archive.
+3. The existing 90 days of Jan-Mar 2026 precip are reproduced
+   byte-identically by the same nearest-neighbor regrid pipeline that
+   `preprocess.py` used originally (verified on all 1 621 350 CONUS
+   pixels: max abs diff = 0 mm/day), so this commit does not silently
+   change any value that was already present in the cube.
+4. All other cube variables (`t2m`, `t2m_anom`, `z500`, `z500_anom`)
+   are copied through unchanged.
+
+**What Claude 4.7 did** (Eduardo wrote no code during this phase):
+
+- Wrote the one-shot rebuild script `_rebuild_precip_d3.py`
+  (idempotent, reads the current cube, replaces only `precip`, writes
+  an atomic temp file + rename). Also a dry-run script and a byte-
+  exact overlap check against the existing cube as pre-commit gates.
+- Updated `app.py` provenance table, the Tab-1 monthly caveat line,
+  and the Methods & Data "known limitations" section to reflect the
+  new Nov-Dec 2025 coverage.
+- Added this chronology expander.
+
+**Pre-commit validation:**
+
+- Byte-exact match to existing cube on the 2026-01-01 / 2026-03-31
+  overlap (90 days, 1 621 350 pixels): max|Δ| = 0, mean|Δ| = 0.
+- Post-rebuild: 151/151 days have finite `precip` for the full CONUS
+  grid. SE-US box mean over the 151-day window = 1.90 mm/day
+  (physically plausible for a mid-latitude winter).
+
+**Scope notes deferred to later D-items:** Nothing in this commit
+touches T2m climatology (D4a), ERA5 precip climatology (D4b),
+hemispheric Z500 (D2), u250/v250 jet (D1), multi-level Z500 monthly
+climo (D5), or monthly PNA (D6). Each will be its own commit with its
+own smoke test.
+
+**Data provenance additions.** The `precip` row in the Methods & Data
+provenance table now reads period = `2025-11-01 → 2026-03-31`. Source
+attribution (CPC Global PRCP V1.0; Chen et al. 2008 / Xie et al. 2007)
+is unchanged.
 """)
 
     st.markdown("## Division of labor")
@@ -1100,8 +1160,6 @@ with tab1:
                f"{abs(SE_US_BOX['lon_max'])}-{abs(SE_US_BOX['lon_min'])}°W).")
     if field_t1 == "t2m_anom":
         caption += " Limitation: 9-year (2016-2024) climatology may be warm-biased vs. the 1991-2020 WMO normal."
-    if field_t1 == "precip" and month_label == "Dec 2025":
-        caption += " CPC precipitation data begins 2026-01-01 — December 2025 rendered as NaN."
     if field_t1 == "z500_anom" and month_label == "Mar 2026":
         caption += " ERA5 Z500 coverage ends 2026-02-28 — March 2026 rendered as NaN."
 
@@ -1636,8 +1694,8 @@ state polygons from Natural Earth (1:50 m).
   30-year normal. Anomalies may be warm-biased vs. 1991-2020 because recent years
   are warmer than the mid-climate baseline.
 - **Z500 climatology = {Z500_CLIMO_BASE}** — close to WMO-standard (27 years).
-- **Precipitation coverage: 2026-01-01 onward.** December 2025 precip is absent;
-  December maps render NaN. Data source: {PRECIP_SOURCE}.
+- **Precipitation coverage: 2025-11-01 → 2026-03-31** (full winter window; gap
+  filled by D3 backfill, see About tab). Data source: {PRECIP_SOURCE}.
 - **Z500 coverage ends 2026-02-28.** March 2026 Z500 panels render NaN.
 - **Daily means** from 00/12 UTC snapshots only — no overnight minima; slight
   (<0.5 °C) warm bias over land during the 12 UTC pass.

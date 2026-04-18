@@ -5,3 +5,11 @@ __pycache__/
 .ipynb_checkpoints/
 .streamlit/secrets.toml
 .venv/
+
+# Raw data dumps used for per-phase integration work; large (multi-GB),
+# machine-local, and reproducible from the links in scripts/*.py.
+New Downloaded Files/
+
+# Scratch inspection/dump helpers written during dev sessions.
+_*.py
+_*.txt
