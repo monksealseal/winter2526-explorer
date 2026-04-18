@@ -3,22 +3,39 @@
 Tabs:
   1. This Winter   — monthly mean maps (T2m anom, Z500 anom, precip)
   2. Indices       — teleconnection time series with SE-US T2m overlay
-                     + correlation table with known-reference r-values
-  3. Composites    — composite difference + correlation maps with lag slider
-  4. Dataset       — cube schema, scientific caveats, reference comparisons
+                     + correlation table with bootstrap CI and references
+  3. Composites    — Welch's-t composite difference + correlation maps
+                     with lag slider and proper significance
+  4. Methods & Data — methods, formulas, data provenance, references
+
+All figures on this page are rendered with cartopy (PlateCarree) at
+ERA5 0.25° native resolution. Correlation CIs use the moving-block
+bootstrap; composite-difference significance uses a per-cell Welch's
+t-test. See tab 4 for methods details.
 
 Every control reads/writes st.query_params so any view is URL-shareable.
 """
+from __future__ import annotations
+import warnings
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from scipy import stats
 import streamlit as st
 import xarray as xr
 
+# Silence cartopy's one-shot Natural Earth download notice on cold start.
+warnings.filterwarnings("ignore", message="Downloading")
+
 from indices import load_all_indices, to_monthly
+from plots import make_map
+from stats import (
+    effective_n,
+    block_bootstrap_corr,
+    welch_t_composite,
+    corr_map_t_significance,
+)
 
 DATA_DIR = Path(__file__).parent / "data"
 CUBE_PATH = DATA_DIR / "cube_winter.nc"
@@ -51,6 +68,55 @@ REFERENCE_R = {
     "pna_t2m": {"r": -0.113, "source": "Abby, slide 47 (approx.)", "method": "monthly"},
 }
 
+# ----- Provenance and methodology metadata (displayed in Methods tab and
+# in inline figure captions). These constants are the single source of
+# truth for period/source strings used elsewhere in the app. -----
+
+T2M_CLIMO_BASE  = "2016-2024 ERA5 daily mean"
+Z500_CLIMO_BASE = "1994-2020 ERA5 daily mean"
+PRECIP_SOURCE   = "NOAA CPC Global PRCP V1.0 (regridded to ERA5 0.25°)"
+
+BOOTSTRAP_N     = 1000
+BOOTSTRAP_ALPHA = 0.05
+
+PROVENANCE = [
+    {"variable": "t2m / t2m_anom", "source": "ERA5 (Copernicus C3S) 2-m temperature, hourly → daily mean from 00/12 UTC",
+     "period": "2025-11-01 → 2026-03-31", "climatology": T2M_CLIMO_BASE,
+     "resolution": "0.25° global", "doi_ref": "Hersbach et al. 2020, QJRMS 146, 1999-2049"},
+    {"variable": "z500 / z500_anom", "source": "ERA5 500 hPa geopotential height",
+     "period": "2025-11-01 → 2026-02-28", "climatology": Z500_CLIMO_BASE,
+     "resolution": "0.25° global", "doi_ref": "Hersbach et al. 2020, QJRMS 146, 1999-2049"},
+    {"variable": "precip", "source": PRECIP_SOURCE,
+     "period": "2026-01-01 → 2026-03-31", "climatology": "— (not anomalized here)",
+     "resolution": "0.5° native → 0.25° interpolated", "doi_ref": "Xie et al. 2007, J. Hydromet. 8, 607-626"},
+    {"variable": "AO, NAO, PNA", "source": "NOAA CPC daily teleconnection indices",
+     "period": "daily, 1950-present", "climatology": "CPC normalisation",
+     "resolution": "—", "doi_ref": "https://www.cpc.ncep.noaa.gov/products/precip/CWlink/"},
+    {"variable": "QBO", "source": "NOAA CPC QBO 30 hPa zonal-mean u-wind",
+     "period": "monthly", "climatology": "—",
+     "resolution": "—", "doi_ref": "Naujokat 1986, J. Atmos. Sci. 43, 1873-1877"},
+    {"variable": "ONI (ENSO)", "source": "NOAA CPC Oceanic Niño Index (3-month SST anomaly, Niño 3.4)",
+     "period": "3-month running mean", "climatology": "1991-2020 centered 30-year",
+     "resolution": "—", "doi_ref": "Huang et al. 2017, J. Climate 30, 8179-8205 (ERSSTv5)"},
+    {"variable": "MJO RMM", "source": "Wheeler & Hendon (2004) RMM1/RMM2 (BoM / NOAA PSL mirror)",
+     "period": "daily, 1974-present", "climatology": "—",
+     "resolution": "—", "doi_ref": "Wheeler & Hendon 2004, Mon. Wea. Rev. 132, 1917-1932"},
+]
+
+REFERENCES = [
+    ("Bretherton et al. (1999)", "The effective number of spatial degrees of freedom of a time-varying field", "J. Climate 12, 1990-2009"),
+    ("Künsch (1989)", "The jackknife and the bootstrap for general stationary observations", "Ann. Statist. 17, 1217-1241"),
+    ("Wilks (2011)", "Statistical Methods in the Atmospheric Sciences, 3rd ed.", "Academic Press"),
+    ("Welch (1947)", "The generalization of Student's problem when several different population variances are involved", "Biometrika 34, 28-35"),
+    ("von Storch & Zwiers (1999)", "Statistical Analysis in Climate Research", "Cambridge Univ. Press"),
+    ("Hersbach et al. (2020)", "The ERA5 global reanalysis", "QJRMS 146, 1999-2049"),
+    ("Xie et al. (2007)", "A gauge-based analysis of daily precipitation over East Asia", "J. Hydromet. 8, 607-626"),
+    ("Wheeler & Hendon (2004)", "An all-season real-time multivariate MJO index", "Mon. Wea. Rev. 132, 1917-1932"),
+    ("Thompson & Wallace (1998)", "The Arctic Oscillation signature in the wintertime geopotential height and temperature fields", "GRL 25, 1297-1300"),
+    ("Hurrell (1995)", "Decadal trends in the North Atlantic Oscillation", "Science 269, 676-679"),
+    ("Wallace & Gutzler (1981)", "Teleconnections in the geopotential height field during the NH winter", "Mon. Wea. Rev. 109, 784-812"),
+]
+
 @st.cache_resource
 def load_cube():   return xr.open_dataset(CUBE_PATH)
 @st.cache_resource
@@ -77,12 +143,26 @@ def box_mean(da, box):
     w = np.cos(np.deg2rad(sel.latitude))
     return sel.weighted(w).mean(dim=["latitude", "longitude"])
 
-def effective_n(arr):
-    s = np.asarray(arr); s = s[~np.isnan(s)]
-    if len(s) < 10: return max(len(s), 2)
-    r1 = np.corrcoef(s[:-1], s[1:])[0, 1]
-    r1 = max(-0.99, min(0.99, r1))
-    return max(2, int(len(s) * (1 - r1) / (1 + r1)))
+@st.cache_data(show_spinner=False)
+def cached_bootstrap_corr(x: tuple, y: tuple, n_boot: int = BOOTSTRAP_N,
+                          block_len: int | None = None) -> dict:
+    """Cached wrapper around stats.block_bootstrap_corr.
+
+    Streamlit's cache requires hashable inputs, so x and y are passed as
+    tuples (not ndarrays). Results are identical to calling
+    ``block_bootstrap_corr(x, y, ...)`` directly.
+    """
+    return block_bootstrap_corr(np.asarray(x, dtype=float),
+                                np.asarray(y, dtype=float),
+                                n_boot=n_boot, block_len=block_len)
+
+
+def fmt_ci(result: dict) -> str:
+    """Format a bootstrap CI result as ``r = +0.56 [+0.31, +0.74]``."""
+    if not np.isfinite(result.get("r", np.nan)):
+        return "—"
+    return (f"{result['r']:+.3f} "
+            f"[{result['ci_lo']:+.3f}, {result['ci_hi']:+.3f}]")
 
 def align_index_to_cube(series, cube_time):
     idx_daily = pd.DatetimeIndex([pd.Timestamp(t).normalize() for t in cube_time])
@@ -190,33 +270,84 @@ with tab1:
     valid_days = int((~ms.mean(dim=("latitude", "longitude")).isnull()).sum())
     meta = VAR_META[field_t1]
 
-    fig = go.Figure(go.Heatmap(
-        z=monthly_mean.values, x=monthly_mean.longitude.values, y=monthly_mean.latitude.values,
-        colorscale=meta["cmap"], zmin=meta["vmin"], zmax=meta["vmax"],
-        colorbar=dict(title=meta["label"]),
-        hovertemplate="lat %{y:.2f}<br>lon %{x:.2f}<br>%{z:.2f}<extra></extra>"))
-    fig.update_layout(
-        title=f"{meta['label']} · {month_label} mean ({valid_days} valid days)",
-        xaxis_title="Longitude (°)", yaxis_title="Latitude (°)",
-        yaxis=dict(scaleanchor="x", scaleratio=1.2),
-        height=540, margin=dict(l=60, r=40, t=60, b=50))
-    with c2:
-        st.plotly_chart(fig, use_container_width=True)
+    is_anom = field_t1.endswith("_anom")
+    climo_note = {
+        "t2m_anom": T2M_CLIMO_BASE, "z500_anom": Z500_CLIMO_BASE,
+    }.get(field_t1, "—")
+    source_note = PRECIP_SOURCE if field_t1 == "precip" else "ERA5 (Hersbach et al. 2020)"
+    subtitle_parts = [source_note, f"{valid_days} valid day{'s' if valid_days != 1 else ''}"]
+    if is_anom:
+        subtitle_parts.insert(1, f"climatology: {climo_note}")
+    subtitle = " · ".join(subtitle_parts)
+    caption = (f"Fig. {month_label} — {meta['label']}. "
+               f"Diverging colormap centered on zero for anomaly fields. "
+               f"Dashed box marks the SE-US analysis region "
+               f"({SE_US_BOX['lat_min']}-{SE_US_BOX['lat_max']}°N, "
+               f"{abs(SE_US_BOX['lon_max'])}-{abs(SE_US_BOX['lon_min'])}°W).")
+    if field_t1 == "t2m_anom":
+        caption += " Limitation: 9-year (2016-2024) climatology may be warm-biased vs. the 1991-2020 WMO normal."
+    if field_t1 == "precip" and month_label == "Dec 2025":
+        caption += " CPC precipitation data begins 2026-01-01 — December 2025 rendered as NaN."
+    if field_t1 == "z500_anom" and month_label == "Mar 2026":
+        caption += " ERA5 Z500 coverage ends 2026-02-28 — March 2026 rendered as NaN."
 
-    if valid_days < 25:
+    with c2:
+        if valid_days == 0:
+            st.warning(f"No valid days in {month_label} for {field_t1} — see Methods & Data for coverage.")
+        else:
+            fig = make_map(
+                monthly_mean.latitude.values, monthly_mean.longitude.values,
+                monthly_mean.values,
+                cmap=meta["cmap"],
+                vmin=meta["vmin"], vmax=meta["vmax"],
+                center_on_zero=is_anom,
+                title=f"{meta['label']} · {month_label} mean",
+                subtitle=subtitle,
+                caption=caption,
+                units=meta["label"],
+                highlight_boxes=[{**SE_US_BOX, "label": "SE-US"}],
+                contour_levels=np.arange(-300, 301, 60) if field_t1 == "z500_anom" else None,
+            )
+            st.pyplot(fig, use_container_width=True)
+            import matplotlib.pyplot as _plt
+            _plt.close(fig)
+
+    if valid_days and valid_days < 25:
         st.warning(f"⚠️ Only {valid_days} valid days in {month_label} for {field_t1}. "
-                   "See Dataset Inspector for coverage.")
+                   "See Methods & Data for coverage.")
 
     if field_t1 == "z500_anom":
         st.caption(
-            "**Reading Z500 anomaly maps:** red = positive anomaly (ridging/high pressure), "
-            "blue = negative anomaly (troughing/low pressure). A PNA-positive pattern shows an "
-            "Alaska ridge with an eastern-US trough."
+            "**Reading Z500 anomaly maps:** red = positive anomaly (ridging / high pressure), "
+            "blue = negative anomaly (troughing / low pressure). Contours drawn every 60 m. "
+            "A PNA-positive pattern shows an Alaska ridge with an eastern-US trough "
+            "(Wallace & Gutzler 1981)."
         )
 
     c_a, c_b = st.columns(2)
     c_a.metric("SE-US box mean", f"{float(box_mean(monthly_mean, SE_US_BOX)):.2f}")
     c_b.metric("Florida box mean", f"{float(box_mean(monthly_mean, FLORIDA_BOX)):.2f}")
+
+    with st.expander("About this analysis"):
+        st.markdown(f"""
+**What:** Grid-point monthly mean of **{meta['label']}** over CONUS for
+**{month_label}**, computed as the simple arithmetic mean across the
+{valid_days} daily snapshots in the month.
+
+**Anomaly definition (for `*_anom` variables):** daily value minus the
+same-calendar-day mean from the {climo_note if is_anom else '— (not applicable)'}
+baseline, averaged over the month.
+
+**Projection:** PlateCarree (equirectangular), native ERA5 0.25° grid.
+Black contours on Z500 are every 60 m.
+
+**Why this plot:** it's the standard "what happened this month" figure —
+directly comparable to CPC monthly climate summaries and to the composite
+panels in Tab 3. Use the Composites & Correlations tab to test attribution.
+
+**Caveats:** the 2016-2024 T2m climatology is shorter than the WMO-standard
+30-year baseline; early/late-season anomalies may be mildly warm-biased.
+""")
 
 with tab2:
     c_l, c_r = st.columns([1, 3])
