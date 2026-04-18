@@ -215,6 +215,165 @@ def get_series(indices, key):
         return indices["mjo"]["amplitude"] if "mjo" in indices else pd.Series(dtype=float)
     return indices.get(key, pd.Series(dtype=float))
 
+
+# ============================================================================
+# 🔬 Explore tab: field catalog, filter/evaluator helpers, partial attribution
+# ============================================================================
+
+# Lat/lon boxes available for field-box-mean conditions and attribution targets.
+EXPLORE_BOXES = {
+    "se_us":   {"lat_min": 25, "lat_max": 37, "lon_min": -92, "lon_max": -75, "label": "SE-US"},
+    "florida": {"lat_min": 24, "lat_max": 31, "lon_min": -87, "lon_max": -80, "label": "Florida"},
+}
+
+# kind:
+#   "index"    -> teleconnection index (daily or monthly cadence, ffill'd to daily)
+#   "phase"    -> MJO phase (discrete 1-8; only the "in set" operator applies)
+#   "box_mean" -> area-weighted mean of a cube variable over a named box
+#   "calendar" -> month of year (discrete 1-12; only "in set" applies)
+EXPLORE_FIELDS = {
+    "ao":          {"kind": "index",    "source": "ao",          "label": "AO",                "units": "σ"},
+    "nao":         {"kind": "index",    "source": "nao",         "label": "NAO",               "units": "σ"},
+    "pna":         {"kind": "index",    "source": "pna",         "label": "PNA (daily)",       "units": "σ"},
+    "pna_monthly": {"kind": "index",    "source": "pna_monthly", "label": "PNA (monthly)",     "units": "σ"},
+    "qbo":         {"kind": "index",    "source": "qbo",         "label": "QBO",               "units": "m/s"},
+    "oni":         {"kind": "index",    "source": "oni",         "label": "ONI (ENSO)",        "units": "°C"},
+    "mjo_amp":     {"kind": "index",    "source": "mjo_amp",     "label": "MJO amplitude",     "units": "σ"},
+    "mjo_phase":   {"kind": "phase",    "source": "mjo",         "label": "MJO phase",         "units": "1-8"},
+    "t2m_anom_se": {"kind": "box_mean", "var": "t2m_anom", "box": "se_us",   "label": "SE-US T2m anom", "units": "°C"},
+    "t2m_anom_fl": {"kind": "box_mean", "var": "t2m_anom", "box": "florida", "label": "FL T2m anom",    "units": "°C"},
+    "precip_se":   {"kind": "box_mean", "var": "precip",   "box": "se_us",   "label": "SE-US precip",   "units": "mm/day"},
+    "precip_fl":   {"kind": "box_mean", "var": "precip",   "box": "florida", "label": "FL precip",      "units": "mm/day"},
+    "z500_anom_se":{"kind": "box_mean", "var": "z500_anom","box": "se_us",   "label": "SE-US Z500 anom","units": "m"},
+    "month":       {"kind": "calendar", "label": "Calendar month",           "units": ""},
+}
+
+
+def explore_field_values(key: str, cube, indices) -> np.ndarray:
+    """Return a 1-D float array of length cube.sizes['time'] for any
+    EXPLORE_FIELDS key. Aligned to cube.time. Monthly-cadence indices are
+    forward-filled to daily. Missing data becomes NaN."""
+    cube_time = cube.time.values
+    n = len(cube_time)
+    f = EXPLORE_FIELDS.get(key)
+    if f is None:
+        return np.full(n, np.nan)
+    kind = f["kind"]
+    idx_daily = pd.DatetimeIndex([pd.Timestamp(t).normalize() for t in cube_time])
+    if kind == "index":
+        s = get_series(indices, f["source"])
+        if s.empty:
+            return np.full(n, np.nan)
+        return align_index_to_cube(s, cube_time).values.astype(float)
+    if kind == "phase":
+        if "mjo" not in indices or indices["mjo"] is None or indices["mjo"].empty:
+            return np.full(n, np.nan)
+        phase = indices["mjo"].reindex(
+            idx_daily, method="nearest", tolerance=pd.Timedelta(days=1))["phase"]
+        return phase.values.astype(float)
+    if kind == "box_mean":
+        if f["var"] not in cube:
+            return np.full(n, np.nan)
+        box = EXPLORE_BOXES[f["box"]]
+        s = box_mean(cube[f["var"]], box).to_series()
+        return s.reindex(idx_daily).values.astype(float)
+    if kind == "calendar":
+        return np.array([pd.Timestamp(t).month for t in cube_time], dtype=float)
+    return np.full(n, np.nan)
+
+
+def explore_apply_condition(arr: np.ndarray, cond: dict) -> np.ndarray:
+    """Return a boolean mask for a single condition. NaN inputs become False.
+    ``negate`` flips the final mask (still NaN→False)."""
+    op = cond.get("op", "<")
+    v  = cond.get("value")
+    arr_f = np.asarray(arr, dtype=float)
+    if op == "<":
+        mask = arr_f <  v
+    elif op == "<=":
+        mask = arr_f <= v
+    elif op == ">":
+        mask = arr_f >  v
+    elif op == ">=":
+        mask = arr_f >= v
+    elif op == "between":
+        v2 = cond.get("value2", v)
+        lo, hi = (v, v2) if v <= v2 else (v2, v)
+        mask = (arr_f >= lo) & (arr_f <= hi)
+    elif op == "abs >":
+        mask = np.abs(arr_f) > v
+    elif op == "in":
+        vs = cond.get("value_set") or []
+        mask = np.isin(arr_f, np.asarray(vs, dtype=float))
+    else:
+        mask = np.zeros_like(arr_f, dtype=bool)
+    finite = ~np.isnan(arr_f)
+    mask = mask & finite
+    if cond.get("negate"):
+        mask = (~mask) & finite
+    return mask
+
+
+def explore_partial_attribution(y_arr, driver_arrs, mask_sel, mask_comp):
+    """Linear partial-attribution decomposition (see Wilks 2011 ch.7).
+
+    Fit OLS  y = a + sum b_i X_i + eps  over all days where every predictor
+    and the target are finite. For each driver X_i return β̂_i (95%
+    parametric CI), Δμ_i = mean(X_i|sel) − mean(X_i|comp), and
+    attributable_i = β̂_i · Δμ_i. Returns (rows, observed Δy, sum_attr)."""
+    drivers = list(driver_arrs.keys())
+    if not drivers or mask_sel.sum() < 1 or mask_comp.sum() < 1:
+        return [], np.nan, np.nan
+    X_full = np.column_stack([driver_arrs[d] for d in drivers])
+    X1 = np.column_stack([np.ones(len(y_arr)), X_full])
+    valid = ~np.isnan(y_arr)
+    for col in range(X_full.shape[1]):
+        valid &= ~np.isnan(X_full[:, col])
+    if int(valid.sum()) < max(5, X1.shape[1] + 2):
+        return [], np.nan, np.nan
+    beta, *_ = np.linalg.lstsq(X1[valid], y_arr[valid], rcond=None)
+    yhat = X1[valid] @ beta
+    resid = y_arr[valid] - yhat
+    n_fit, k_fit = X1[valid].shape
+    if n_fit > k_fit:
+        sigma2 = float(resid @ resid / (n_fit - k_fit))
+        try:
+            cov = sigma2 * np.linalg.inv(X1[valid].T @ X1[valid])
+            se = np.sqrt(np.diag(cov))
+        except np.linalg.LinAlgError:
+            se = np.full(k_fit, np.nan)
+    else:
+        se = np.full(k_fit, np.nan)
+    y_sel  = float(np.nanmean(y_arr[mask_sel]))
+    y_comp = float(np.nanmean(y_arr[mask_comp]))
+    delta_y_obs = y_sel - y_comp
+    rows = []
+    sum_attr = 0.0
+    for i, d in enumerate(drivers):
+        b = float(beta[i + 1])
+        b_se = float(se[i + 1]) if i + 1 < len(se) else float("nan")
+        x_sel  = float(np.nanmean(driver_arrs[d][mask_sel]))
+        x_comp = float(np.nanmean(driver_arrs[d][mask_comp]))
+        delta_x = x_sel - x_comp
+        attr = b * delta_x
+        sum_attr += attr
+        rows.append({
+            "driver": d, "beta": b,
+            "ci_lo": b - 1.96 * b_se, "ci_hi": b + 1.96 * b_se,
+            "delta_mu": delta_x, "attributable": attr,
+        })
+    return rows, delta_y_obs, sum_attr
+
+
+def explore_traffic_light(n_eff: float) -> tuple:
+    """Map effective sample size to (emoji, hex color, short verdict)."""
+    if n_eff >= 30:
+        return "🟢", "#1a7f37", "Citable — effective N ≥ 30"
+    if n_eff >= 10:
+        return "🟡", "#9a6700", "Suggestive — 10 ≤ effective N < 30, wide CIs"
+    return "🔴", "#a40e26", "Exploratory only — effective N < 10, do not cite"
+
+
 st.set_page_config(page_title="Winter 2025-2026 Explorer", page_icon="❄️", layout="wide")
 
 try:
@@ -243,13 +402,15 @@ st.caption(
 
 MJO_LOADED = "mjo" in indices
 
-tab_about, tab_rc, tab1, tab2, tab3, tab4 = st.tabs([
+tab_about, tab_rc, tab1, tab2, tab3, tab_explore, tab4, tab_guide = st.tabs([
     "📜 About & authorship",
     "🧭 Research compass",
     "This Winter",
     "Indices",
     "Composites & Correlations",
+    "🔬 Explore",
     "Methods & Data",
+    "📖 User Guide",
 ])
 
 # ==================================================================
@@ -603,6 +764,82 @@ statistic should use `pna_monthly`.
 
 **No runtime changes to T2m, Z500, precip, or any other index.** This
 commit is purely additive at the index layer.
+""")
+
+    with st.expander("**Session 2, Phase 5 — Explore tab + User Guide + deferred-items parking lot**",
+                     expanded=False):
+        st.markdown("""
+**Prompt context by Eduardo** (Session 2, after D3 and D6 landed). In
+response to the research question *"create tools that allow us to rule
+out causes for anomalies — we want to properly understand what causes
+what,"* Eduardo paused the D4a→D2→D1→D4b→D5 data-integration queue
+and redirected Claude to build **exploration and attribution tools
+using only the existing cube + indices**. He also asked for a
+dedicated User Guide tab with concrete click-paths for Tori's team.
+
+**What Claude 4.7 did** (Eduardo wrote no code during this phase):
+
+*New tab* **🔬 Explore** (between Composites and Methods & Data):
+
+- Compound day-selector with a stack of AND'd condition rows. Each
+  row picks a field (any index, MJO phase, a box mean of a cube
+  variable, or the calendar month), an operator (`<`, `<=`, `>`,
+  `>=`, `between`, `abs >`, `in`), and a threshold. A NOT toggle
+  inverts the row; × removes it; "+ Add condition" appends.
+- Sample-size summary with a **traffic-light badge**
+  (🟢 / 🟡 / 🔴) keyed to effective N (Bretherton et al. 1999, lag-1
+  AR adjusted) of the smaller of the selected / complement groups.
+  Thresholds: N_eff ≥ 30 citable, 10-30 suggestive, < 10 exploratory.
+- **Partial attribution table** — the centerpiece. For a user-chosen
+  target (SE-US or FL T2m anom / precip / Z500 anom) and a subset of
+  candidate drivers (AO, NAO, PNA, QBO, ONI, MJO amplitude), the
+  table decomposes the observed composite Δ_target as
+  Δ ≈ Σ β̂ᵢ · Δμᵢ + Residual, where β̂ᵢ comes from a multiple OLS
+  regression over all 151 winter days. Per-driver rows show β̂ (with
+  parametric 95 % CI), Δμ = mean(driver|sel) − mean(driver|comp), and
+  Attributable = β̂ · Δμ in target units and as a percentage of the
+  observed Δ. A three-metric row summarizes Observed / Σ Attributable
+  / Residual with a keyed interpretation paragraph.
+
+*New tab* **📖 User Guide** (the last tab):
+
+- Purpose-built how-to for Tori's group. Walks through each of Q1-Q5
+  with exact click paths; demonstrates the Explore tab with three
+  concrete worked examples (FL cold attribution, wet-January
+  attribution, ruling ENSO out); explains how to read the traffic
+  light, when a result is citable, and how to bookmark a state via
+  URL. Intended as the first tab a new teammate opens.
+
+*New repo file* **`docs/deferred_phase_items.md`**:
+
+- Parking lot for D4a, D2, D1, D4b, D5 — the data-integration items
+  that were scoped, agreed, and deferred to a later session. Each
+  entry has goal, data sources (file paths in `New Downloaded Files/`),
+  pipeline sketch, size estimate, UI change, validation gate (for
+  D4b), and caveats. Linked from this About tab so reviewers can see
+  the parked roadmap without opening the repo.
+
+**Method references cited in the new Explore expander:**
+
+- Wilks (2011), *Statistical Methods in the Atmospheric Sciences*
+  3rd ed., ch. 7 — multiple regression and partial attribution.
+- Bretherton et al. (1999), *J. Climate* 12, 1990-2009 — effective
+  sample size under serial autocorrelation.
+- Pearl (2009), *Causality* §3 — limits of observational attribution.
+
+**Honest limits, flagged in the tab itself:**
+
+1. Linear decomposition misses nonlinear and interaction effects.
+2. Parametric OLS CIs on β̂ ignore serial autocorrelation; persistent
+   drivers (ONI, QBO) will have CIs that are too narrow.
+3. β̂ is fit on a 151-day winter sample — it describes this winter's
+   internal covariance, *not* universal teleconnection strengths.
+4. Target boxes are fixed (SE-US or Florida); custom boxes deferred.
+
+**Deferred roadmap preserved** at [`docs/deferred_phase_items.md`](
+https://github.com/monksealseal/winter2526-explorer/blob/main/docs/deferred_phase_items.md)
+with the full D1-D5 scope, data sources, and validation gates intact
+for the next session.
 """)
 
     st.markdown("## Division of labor")
@@ -1645,6 +1882,294 @@ the CI on the SE-US summary. Composite differences at tails of the distribution
 (±2σ) are doubly weak because group sizes shrink.
 """)
 
+# ==================================================================
+# Tab Explore — custom composite builder + partial attribution
+# ==================================================================
+with tab_explore:
+    qp_set(tab="explore")
+    st.header("🔬 Explore — slice, filter, and attribute")
+    st.caption(
+        "Build a sample of days with a compound filter, then decompose its "
+        "composite signal into per-driver contributions. The partial-"
+        "attribution table is the centerpiece — it tells you which "
+        "candidate drivers linearly explain the observed anomaly and which "
+        "don't, so you can rule drivers out. See the 'About this analysis' "
+        "expander for the method, limits, and references."
+    )
+
+    # ---- session state: list of conditions ----
+    if "explore_conds" not in st.session_state:
+        st.session_state.explore_conds = [
+            {"field": "nao", "op": "<", "value": -1.0, "value2": None,
+             "value_set": None, "negate": False}
+        ]
+
+    st.markdown("### Day selector")
+    st.caption(
+        "Rows are combined with **AND**. Toggle **NOT** to invert a row. "
+        "`between` takes two values (low, high). `abs >` matches |field| > value. "
+        "`in` applies to discrete fields (MJO phase, calendar month)."
+    )
+
+    to_remove = None
+    for _i, _cond in enumerate(st.session_state.explore_conds):
+        _cc = st.columns([2.8, 1.6, 2.4, 0.9, 0.9, 0.5])
+        _field_keys = list(EXPLORE_FIELDS)
+        with _cc[0]:
+            _cond["field"] = st.selectbox(
+                "Field", _field_keys,
+                index=_field_keys.index(_cond["field"]) if _cond["field"] in _field_keys else 0,
+                format_func=lambda k: EXPLORE_FIELDS[k]["label"],
+                key=f"expl_field_{_i}", label_visibility="collapsed")
+        _kind = EXPLORE_FIELDS[_cond["field"]]["kind"]
+        _ops_for_kind = {
+            "index":    ["<", "<=", ">", ">=", "between", "abs >"],
+            "phase":    ["in"],
+            "box_mean": ["<", "<=", ">", ">=", "between", "abs >"],
+            "calendar": ["in"],
+        }[_kind]
+        with _cc[1]:
+            if _cond["op"] not in _ops_for_kind:
+                _cond["op"] = _ops_for_kind[0]
+            _cond["op"] = st.selectbox(
+                "Op", _ops_for_kind,
+                index=_ops_for_kind.index(_cond["op"]),
+                key=f"expl_op_{_i}", label_visibility="collapsed")
+        with _cc[2]:
+            if _cond["op"] == "in":
+                if _kind == "phase":
+                    _default = _cond.get("value_set") or [7, 8]
+                    _default = [d for d in _default if d in range(1, 9)] or [7, 8]
+                    _cond["value_set"] = st.multiselect(
+                        "Phases", list(range(1, 9)), default=_default,
+                        key=f"expl_vs_{_i}", label_visibility="collapsed")
+                else:  # calendar
+                    _default = _cond.get("value_set") or [12, 1, 2]
+                    _default = [d for d in _default if d in range(1, 13)] or [12, 1, 2]
+                    _cond["value_set"] = st.multiselect(
+                        "Months", list(range(1, 13)), default=_default,
+                        format_func=lambda m: pd.Timestamp(2000, int(m), 1).strftime("%b"),
+                        key=f"expl_vs_{_i}", label_visibility="collapsed")
+            elif _cond["op"] == "between":
+                _v1, _v2 = st.columns(2)
+                with _v1:
+                    _cond["value"] = st.number_input(
+                        "lo", value=float(_cond["value"] or 0.0), step=0.25,
+                        key=f"expl_v_{_i}", label_visibility="collapsed")
+                with _v2:
+                    _cond["value2"] = st.number_input(
+                        "hi", value=float(_cond["value2"] or 0.0), step=0.25,
+                        key=f"expl_v2_{_i}", label_visibility="collapsed")
+            else:
+                _cond["value"] = st.number_input(
+                    "Value", value=float(_cond["value"] or 0.0), step=0.25,
+                    key=f"expl_v_{_i}", label_visibility="collapsed")
+        with _cc[3]:
+            st.caption(f"_{EXPLORE_FIELDS[_cond['field']].get('units', '')}_")
+        with _cc[4]:
+            _cond["negate"] = st.checkbox("NOT", value=_cond["negate"], key=f"expl_n_{_i}")
+        with _cc[5]:
+            if st.button("×", key=f"expl_rm_{_i}", help="Remove this row"):
+                to_remove = _i
+
+    if to_remove is not None:
+        st.session_state.explore_conds.pop(to_remove)
+        st.rerun()
+
+    if st.button("+ Add condition", key="expl_add"):
+        st.session_state.explore_conds.append(
+            {"field": "ao", "op": "<", "value": 0.0, "value2": None,
+             "value_set": None, "negate": False})
+        st.rerun()
+
+    # ---- Evaluate filter ----
+    n_days = cube.sizes["time"]
+    mask = np.ones(n_days, dtype=bool)
+    for _cond in st.session_state.explore_conds:
+        _arr = explore_field_values(_cond["field"], cube, indices)
+        mask &= explore_apply_condition(_arr, _cond)
+    mask_sel = mask
+    mask_comp = ~mask
+
+    n_sel  = int(mask_sel.sum())
+    n_comp = int(mask_comp.sum())
+
+    # Effective N via lag-1 AR of the selector signal itself
+    try:
+        n_sel_eff  = float(effective_n(mask_sel.astype(float)))  if n_sel  > 2 else float(n_sel)
+    except Exception:
+        n_sel_eff = float(n_sel)
+    try:
+        n_comp_eff = float(effective_n(mask_comp.astype(float))) if n_comp > 2 else float(n_comp)
+    except Exception:
+        n_comp_eff = float(n_comp)
+    n_eff = min(n_sel_eff, n_comp_eff)
+
+    _emoji, _color, _verdict = explore_traffic_light(n_eff)
+
+    st.markdown("### Sample")
+    s1, s2, s3, s4 = st.columns([1, 1, 1, 2])
+    s1.metric("Selected days", f"{n_sel}")
+    s2.metric("Complement",    f"{n_comp}")
+    s3.metric("Effective N",   f"{n_eff:.0f}")
+    s4.markdown(
+        f"<div style='padding:0.6em 0.9em; border-radius:0.5em; "
+        f"background:{_color}22; color:{_color}; font-weight:600; "
+        f"border:1px solid {_color};'>{_emoji} &nbsp; {_verdict}</div>",
+        unsafe_allow_html=True)
+
+    if n_sel < 1:
+        st.warning("No days match the current filter. Loosen a condition.")
+        st.stop()
+    if n_comp < 1:
+        st.warning("Filter matches every day — complement is empty. Tighten a condition.")
+        st.stop()
+
+    # ---- Partial attribution ----
+    st.markdown("### Partial attribution")
+    st.caption(
+        "For each candidate driver X, "
+        "**Attributable<sub>X</sub> = β̂<sub>X</sub> × ( mean(X | selected) − mean(X | complement) )**, "
+        "where β̂ is the coefficient from a multiple OLS regression of "
+        "the target on all candidate drivers over the 151-day winter. "
+        "The **Residual** row is the part of the observed composite Δ that "
+        "linear combinations of these drivers cannot explain.",
+        unsafe_allow_html=True)
+
+    t_c1, t_c2 = st.columns(2)
+    with t_c1:
+        _target_opts = [k for k, v in EXPLORE_FIELDS.items() if v["kind"] == "box_mean"]
+        _target_default = qp_get("expl_tgt", "t2m_anom_fl", str)
+        if _target_default not in _target_opts:
+            _target_default = "t2m_anom_fl"
+        target_pick = st.selectbox(
+            "Target (box mean)", _target_opts,
+            index=_target_opts.index(_target_default),
+            format_func=lambda k: EXPLORE_FIELDS[k]["label"],
+            key="expl_tgt_sel")
+    with t_c2:
+        _driver_pool = ["ao", "nao", "pna", "qbo", "oni", "mjo_amp"]
+        _driver_pool = [d for d in _driver_pool if d in indices or (d == "mjo_amp" and "mjo" in indices)]
+        _driver_default = [d for d in ["ao", "nao", "pna", "oni", "mjo_amp"] if d in _driver_pool]
+        driver_pick = st.multiselect(
+            "Candidate drivers (regress on these)", _driver_pool,
+            default=_driver_default,
+            format_func=lambda k: EXPLORE_FIELDS[k]["label"],
+            key="expl_drv_sel")
+    qp_set(expl_tgt=target_pick)
+
+    y_arr = explore_field_values(target_pick, cube, indices)
+    driver_arrs = {d: explore_field_values(d, cube, indices) for d in driver_pick}
+
+    _rows, _delta_obs, _sum_attr = explore_partial_attribution(
+        y_arr, driver_arrs, mask_sel, mask_comp)
+
+    if not _rows:
+        st.warning("Not enough overlapping finite data for the regression. "
+                   "Reduce the number of drivers or loosen the filter.")
+    else:
+        _units = EXPLORE_FIELDS[target_pick]["units"]
+        _tgt_label = EXPLORE_FIELDS[target_pick]["label"]
+        _attr_rows = [
+            {
+                "Driver": EXPLORE_FIELDS[r["driver"]]["label"],
+                f"β̂ (Δ{_tgt_label} / {EXPLORE_FIELDS[r['driver']].get('units','?')})":
+                    f"{r['beta']:+.3f}",
+                "95 % CI on β̂": f"[{r['ci_lo']:+.3f}, {r['ci_hi']:+.3f}]",
+                "Δμ (sel − comp)": f"{r['delta_mu']:+.3f}",
+                f"Attributable Δ ({_units})": f"{r['attributable']:+.3f}",
+                "% of observed":
+                    (f"{100 * r['attributable'] / _delta_obs:+.0f} %"
+                     if abs(_delta_obs) > 1e-9 else "—"),
+            }
+            for r in _rows
+        ]
+        st.dataframe(pd.DataFrame(_attr_rows), hide_index=True, use_container_width=True)
+
+        _resid = _delta_obs - _sum_attr
+        m1, m2, m3 = st.columns(3)
+        m1.metric(f"Observed composite Δ ({_units})", f"{_delta_obs:+.3f}")
+        m2.metric("Σ attributable", f"{_sum_attr:+.3f}",
+                  delta=(f"{100 * _sum_attr / _delta_obs:+.0f} % of observed"
+                         if abs(_delta_obs) > 1e-9 else None))
+        m3.metric("Residual (unexplained)", f"{_resid:+.3f}",
+                  delta=(f"{100 * _resid / _delta_obs:+.0f} % of observed"
+                         if abs(_delta_obs) > 1e-9 else None))
+
+        # Interpretation guide keyed to sign of observed
+        if abs(_delta_obs) < 1e-9:
+            st.info("Observed composite Δ is ≈ 0 — the selected and complement "
+                    "samples have nearly the same target mean. Nothing for the "
+                    "drivers to attribute.")
+        else:
+            _dominant = max(_rows, key=lambda r: abs(r["attributable"]))
+            _dom_frac = 100 * _dominant["attributable"] / _delta_obs
+            _res_frac = 100 * _resid / _delta_obs
+            st.info(
+                f"**Interpretation.** Observed Δ{_tgt_label} = {_delta_obs:+.2f} {_units}. "
+                f"The largest attributable driver is **{EXPLORE_FIELDS[_dominant['driver']]['label']}** "
+                f"({_dom_frac:+.0f} % of observed). The residual "
+                f"({_res_frac:+.0f} % of observed) is what a linear "
+                f"combination of your chosen drivers cannot explain — "
+                f"candidates: nonlinear/interaction effects, or forcing outside "
+                f"your driver list."
+            )
+
+    # ---- About this analysis ----
+    with st.expander("About this analysis — methodology, limits, references"):
+        st.markdown(f"""
+**Filter semantics.** Every condition you add is ANDed with the rest.
+Each condition tests one field (an index, MJO phase, a box mean of a
+cube variable, or the calendar month) against a threshold or set.
+Rows where the field is NaN are excluded. Toggle **NOT** on a row to
+invert its contribution (still NaN→False).
+
+**Partial attribution math.** Given target y and candidate drivers
+X₁ … X_k, we fit OLS **y = α + Σ βᵢ Xᵢ + ε** over all {n_days} winter
+days where every input is finite. For each driver Xᵢ we report:
+
+- **β̂ᵢ** with ±1.96·SE as a 95 % CI (parametric OLS, *not* adjusted
+  for serial autocorrelation).
+- **Δμᵢ = mean(Xᵢ | selected) − mean(Xᵢ | complement)**.
+- **Attributableᵢ = β̂ᵢ · Δμᵢ** in target units.
+
+The observed composite **Δy = mean(y | sel) − mean(y | comp)** is
+decomposed as Δy ≈ Σ Attributableᵢ + Residual. A driver with large
+|Attributable / Δy| and β̂ ≠ 0 is *linearly implicated*. One with
+near-zero Attributable is not. The residual is what linear
+combinations of these drivers cannot reach.
+
+**Traffic-light thresholds** (Bretherton et al. 1999, lag-1 AR
+adjusted) on the smaller of the two groups:
+
+- 🟢 green: N_eff ≥ 30
+- 🟡 yellow: 10 ≤ N_eff < 30
+- 🔴 red: N_eff < 10 — exploratory only.
+
+**Caveats.**
+
+1. Linear decomposition misses nonlinear and interaction effects
+   (e.g. MJO × ENSO constructive/destructive interference). A large
+   residual can mean *nonlinear effect* as well as *unknown forcing*.
+2. The β̂ CIs use parametric OLS. They ignore serial autocorrelation
+   and will be too narrow on persistent drivers (ONI, QBO). Borderline
+   significance should be treated skeptically.
+3. We regress on a 151-day winter sample, not 30 years. β̂ here
+   describes *this winter's* internal covariance, not universal
+   teleconnection strengths. Do not transport values.
+4. Box means use cos-lat weighting. The target box is fixed (SE-US or
+   Florida as of Phase 5); custom boxes will arrive in a later commit.
+
+**References.**
+
+- Wilks (2011), *Statistical Methods in the Atmospheric Sciences*,
+  3rd ed., ch. 7 (multiple regression, partial attribution).
+- Bretherton, C. S., M. Widmann, V. Dymnikov, J. M. Wallace, and I.
+  Bladé, 1999: The effective number of spatial degrees of freedom of
+  a time-varying field. *J. Climate* 12, 1990-2009.
+- Pearl (2009), *Causality*, §3 — limits of observational attribution.
+""")
+
 with tab4:
     qp_set(tab="methods")
     st.header("Methods & Data")
@@ -1786,3 +2311,368 @@ state polygons from Natural Earth (1:50 m).
 
     with st.expander("Raw xarray cube repr"):
         st.code(repr(cube), language="python")
+
+
+# ==================================================================
+# Tab Guide — user guide for the team with concrete click-paths
+# ==================================================================
+with tab_guide:
+    qp_set(tab="guide")
+    st.header("📖 User Guide")
+    st.caption(
+        "Task-oriented walkthrough for Group 2 Subgroup A. Each section "
+        "maps one of Tori's research questions to the exact tabs and "
+        "controls that answer it. The last section shows three worked "
+        "attribution workflows in the new 🔬 Explore tab."
+    )
+
+    st.markdown("## Start here")
+    st.markdown("""
+The app covers **Nov 1 2025 → Mar 31 2026** over CONUS at ERA5 0.25°.
+Daily T2m, 500 mb height, and precipitation are available; daily AO /
+NAO / PNA / QBO / MJO (ROMI) and monthly ONI / PNA indices are loaded
+alongside. Every control writes to the URL bar, so any view you reach
+can be bookmarked or shared by copying the URL.
+
+**Tab map.**
+
+| Tab | What it's for |
+|---|---|
+| 🧭 Research compass | Purpose-built answers to Tori's Q1 – Q5. Start here for her questions. |
+| This Winter | Monthly-mean CONUS maps (T2m anom, Z500 anom, precip) per month with cartopy coastlines. |
+| Indices | Time-series overlays for any subset of teleconnection indices, daily or monthly cadence, with the SE-US T2m anom overlay and a reconciled r-values table. |
+| Composites & Correlations | Tab-3 composite differences (Welch's-t) and correlation maps (with moving-block bootstrap CIs on the SE-US box time series) for any index × field × lag. |
+| 🔬 Explore | Compound filter + partial-attribution table. Use to rule drivers in or out for any sample of days you can describe. |
+| Methods & Data | Provenance table, methods section, references, known limitations. |
+| 📜 About & authorship | Chronology of who did what, AI-assistance disclosure, division-of-labor table, how-to-cite block. |
+""")
+
+    st.markdown("---")
+    st.markdown("## Answering Tori's questions — exact click paths")
+
+    with st.expander("**Q1 — What were the coldest weeks over Florida?**", expanded=True):
+        st.markdown("""
+**Where.** 🧭 Research compass → *Q1* section (top).
+
+**Click path.**
+1. Slider **Threshold** — set the °C anomaly cutoff. Start at `-2`
+   (days where Florida was ≥ 2 °C below climatology).
+2. Slider **Min duration** — how many consecutive days must clear
+   the threshold to count as an "event". Start at `3` days.
+3. Read the time series: grey line is daily FL T2m anom, steelblue
+   shaded bands mark detected events.
+4. Read the event table below: `start`, `end`, `days`, `mean anom`,
+   `min anom` for each event.
+
+**Worked example.** Threshold = `-2`, min_duration = `3` → if the
+table shows one event in late Feb 2026 with mean anom = `-2.9 °C`
+lasting 6 days, that's your Q1 answer: a single 6-day cold outbreak
+centered in late February.
+
+**Deeper dive.** Copy one event's date range (say 2026-02-18 to
+2026-02-23). Go to the 🔬 Explore tab. Add a condition `Calendar
+month in {Feb}` AND `FL T2m anom < -2`. The selected-day table
+matches the event window; the partial attribution below tells you
+which drivers were unusual on those days.
+""")
+
+    with st.expander("**Q2 — Did MJO phases modulate Florida T2m at 5-15 day leads?**"):
+        st.markdown("""
+**Where.** 🧭 Research compass → *Q2* section (MJO phase × lag
+heatmap).
+
+**What you see.** 4 lag rows (0, 5, 10, 15 days) × 8 phase columns.
+Each cell = mean FL T2m anom on days where MJO was in that phase
+with amplitude ≥ 1, at the stated lag.
+
+**Reading the map.**
+- Positive lag = MJO leads (useful for forecasting).
+- Blue cells = FL cold anomaly. Red cells = warm.
+- The hypothesis from Johnson et al. 2014 is that **phases 7-8 at
+  lag +10 days** drive eastern-US cold.
+- If your +10 d row shows blue under phase 7 and phase 8, that
+  matches the literature for this winter.
+
+**Caveat.** Each cell averages only the days that meet the filter
+(amp ≥ 1 AND in phase p). With only 151 winter days, cells often
+have *n = 5-15*. Treat magnitudes as suggestive, not decisive.
+""")
+
+    with st.expander("**Q3 — Phase 7/8 lagged Z500 composite**"):
+        st.markdown("""
+**Where.** 🧭 Research compass → *Q3* section (four cartopy maps in
+a row).
+
+**What you see.** Z500 anomaly composite maps at lags 0, +5, +10,
++15 days, composited over all days where MJO was in phase 7 or 8
+with amp ≥ 1.
+
+**Reading the maps.**
+- Look for an **eastern-US trough** developing at +5 to +15 days.
+  That's the canonical Rossby-wave-train response to the phase 7/8
+  tropical heating pattern (Seo & Son 2012; Tseng et al. 2019).
+- Red contours = positive Z500 anom (ridging). Blue = troughing.
+
+**Provenance.** Z500 climatology is the 1994-2020 ERA5 mean.
+Coverage ends 2026-02-28; March 2026 is not used here.
+""")
+
+    with st.expander("**Q4 — MJO × ENSO 2×2 conditional composite**"):
+        st.markdown("""
+**Where.** 🧭 Research compass → *Q4* section (four maps in a 2×2
+grid).
+
+**What you see.** CONUS T2m anom composite at +10-day lag, split
+four ways: MJO phase 1-2 vs phase 7-8 (rows), ENSO La Niña vs El
+Niño (columns).
+
+**Interpretation** (per Johnson et al. 2014 and Tseng et al. 2019):
+- **La Niña + phase 7-8** → strongest eastern-US cold
+  (constructive interference).
+- **El Niño + phase 1-2** → weak response (destructive).
+
+**This winter.** Scan the four panels. The contrast between the
+cells quantifies this winter's interference pattern. With only
+~150 days split four ways, each cell has small n; magnitudes are
+suggestive.
+""")
+
+    with st.expander("**Q5 — OLS regression of FL T2m anom on AO, NAO, PNA, ONI**"):
+        st.markdown("""
+**Where.** 🧭 Research compass → *Q5* section.
+
+**What you see.** Coefficient table (β, SE, t, p for each driver),
+R² and adjusted R², and a three-line chart (observed / fitted /
+residual).
+
+**Interpretation.**
+- **R² ≈ 0.15** means ~85 % of daily FL T2m anom variance this
+  winter is *not* linearly explained by AO + NAO + PNA + ONI.
+- A coefficient with |t| > 2 is at least marginally significant
+  *under the parametric assumption* — which ignores autocorrelation
+  and overstates significance for persistent drivers (ONI).
+- The **residual** time series (blue) is what's left after linear
+  drivers. If a cold event in Q1 shows a large negative residual,
+  Q1-Q5 together rule out AO/NAO/PNA/ONI as *the* cause — something
+  else drove it (candidates: MJO, Arctic forcing, model error).
+
+**Going further.** The 🔬 Explore tab generalizes Q5: pick any
+subset of drivers, any target (not just FL T2m), and see the
+partial-attribution table on any sample of days you define.
+""")
+
+    with st.expander("**Q6 – Q8 — deferred (not yet answerable in this app)**"):
+        st.markdown("""
+- **Q6 La Niña analog search.** Needs prior-winter ERA5 cubes
+  (2016-17, 2017-18, 2020-21, 2021-22, 2022-23). Data is on disk
+  in `New Downloaded Files/`; integration is parked as D4a / D4b in
+  [`docs/deferred_phase_items.md`](
+  https://github.com/monksealseal/winter2526-explorer/blob/main/docs/deferred_phase_items.md).
+- **Q7 Rossby wave train Hovmöller.** Needs hemispheric Z500 (not
+  just CONUS). Data on disk; parked as **D2**.
+- **Q8 250 mb jet.** Needs u250, v250 daily. Data on disk for
+  Jan-Feb 2026 only; parked as **D1**.
+
+Next session will resume the D-queue in the order D4a → D2 → D1 →
+D4b → D5.
+""")
+
+    st.markdown("---")
+    st.markdown("## Three worked attribution workflows (🔬 Explore tab)")
+
+    with st.expander("**Workflow A — 'Was the Feb 2026 FL cold from AO or MJO?'**",
+                     expanded=True):
+        st.markdown("""
+**Goal.** You saw a Florida cold stretch in February. You want to
+know which teleconnection was *the* driver — or whether the cold is
+consistent with a linear combination of them.
+
+**Steps** (in the 🔬 Explore tab):
+
+1. **Filter row 1.** Field = `Calendar month`, Op = `in`, Set = `{Feb}`.
+   Selects 28 days.
+2. **Filter row 2.** Field = `FL T2m anom`, Op = `<`, Value = `-2`.
+   Selects the Feb days where Florida was ≥ 2 °C below climo.
+3. **Sample summary.** Expect roughly 5-15 selected days, ~140
+   complement days. Traffic light should be 🔴 red (N_eff < 10).
+   *Read this honestly: sample is tiny.*
+4. **Target.** `FL T2m anom`.
+5. **Drivers.** AO, NAO, PNA, ONI, MJO amp (the default).
+6. **Read the attribution table.**
+   - Row with the largest `|Attributable / observed Δ|` is the
+     linear-leading candidate.
+   - Rows with near-zero attributable **can be ruled out** —
+     whatever was going on, those drivers were not unusual on the
+     selected days.
+   - A large Residual (> 50 % of observed) means linear combinations
+     of these drivers can't explain the event; look to MJO phase
+     structure (Q3/Q4) or to nonlinear interactions.
+
+**Example interpretation** (made-up numbers for illustration):
+
+> AO attributable = −1.1 °C (60 % of observed); PNA = −0.2 °C (11 %);
+> ONI = +0.05 °C (−3 %); MJO amp = −0.3 °C (17 %); residual = 0.3 °C
+> (15 %). Conclusion: *on these days, AO accounts for most of the
+> cold. ENSO is effectively ruled out (contribution 3 %). MJO is
+> secondary but nonzero.*
+
+**Then what.** Cross-check on 🧭 Research compass Q3 (phase 7/8 lag
+composite) to see whether MJO's contribution tracks the Rossby-wave
+train hypothesis, and on Q5 to see whether that winter-wide
+regression agrees with the within-event attribution here.
+""")
+
+    with st.expander("**Workflow B — 'Was January 2026 wetter than normal, and why?'**"):
+        st.markdown("""
+**Goal.** Precipitation anomaly detection + attribution.
+
+**Steps** (🔬 Explore):
+
+1. **Filter row 1.** Field = `Calendar month`, Op = `in`, Set = `{Jan}`.
+2. **Filter row 2.** Field = `SE-US precip`, Op = `>`, Value = `5`
+   (mm/day threshold — adjust to taste).
+3. **Target.** `SE-US precip`.
+4. **Drivers.** Start with NAO, PNA, ONI, MJO amp (AO tends to be
+   less precip-relevant over the SE).
+5. **Attribution table.**
+
+**What to look for.**
+- Negative-phase NAO has historically been associated with wetter
+  SE-US winters (Higgins et al. 2000). If NAO's β̂ is negative and
+  Δμ(NAO | selected − complement) is negative, you'd expect a
+  positive (wet) attribution.
+- ONI positive (El Niño) is historically wet for the SE in winter
+  (Ropelewski & Halpert 1986). Check ONI's row.
+
+**Caveat.** We have *no precip climatology* in the cube yet. The
+`precip` variable here is raw daily mm/day, not anomalized. β̂'s
+interpretation is therefore **rate of change of raw daily rainfall
+per unit of driver**, not a normalized anomaly. The precip
+climatology item is parked as D4b in the deferred doc.
+""")
+
+    with st.expander("**Workflow C — 'Rule ENSO out for this winter's FL cold'**"):
+        st.markdown("""
+**Goal.** You have a hypothesis: *this winter's FL cold is NOT
+driven by La Niña, despite the narrative*. You want to demonstrate
+or refute it.
+
+**Steps** (🔬 Explore):
+
+1. **Filter.** One row: Field = `FL T2m anom`, Op = `<`, Value = `-2`.
+   Selects all cold days this winter.
+2. **Target.** `FL T2m anom`.
+3. **Drivers.** Include AO, NAO, PNA, ONI, MJO amp.
+4. **Look specifically at the ONI row.**
+   - If `β̂_ONI` × CI straddles zero → ENSO's marginal effect on FL
+     T2m *in this winter's 151 days* is statistically
+     indistinguishable from zero, *holding the other drivers fixed*.
+   - If `Δμ(ONI | cold − not-cold)` is small (say |·| < 0.1 °C on a
+     sigma-normalized ONI) → the cold days were not ENSO-unusual.
+   - Attributable = β̂ × Δμ. If this is < 5 % of the observed
+     composite Δ, you can say: *ENSO explains < 5 % of the signal.*
+
+**How to phrase the conclusion** (honest version):
+
+> "After controlling linearly for AO, NAO, PNA, and MJO amplitude
+> on all 151 winter days, ENSO's marginal contribution to Florida's
+> cold composite is X °C — less than Y % of the observed signal.
+> The data do not support attributing this winter's FL cold to ENSO."
+
+**What this does NOT let you say.**
+- *Causally* rule out ENSO. Observational attribution cannot
+  distinguish causation from a confounder. Pearl (2009) §3.
+- Rule out ENSO in general — only in this winter's 151-day sample.
+- Rule out nonlinear ENSO effects that a linear regression misses.
+
+For a counterfactual ("what would FL T2m have been without La
+Niña?") we'd need the D4a climatology rebuild plus a La Niña analog
+search (Q6). Those are in the deferred queue.
+""")
+
+    st.markdown("---")
+    st.markdown("## Reading results honestly")
+    st.markdown("""
+**Traffic light.** Every sample-size-sensitive result in the 🔬
+Explore tab carries a badge:
+
+- 🟢 **green, effective N ≥ 30** — citable. Go ahead and put
+  numbers in a presentation, with the usual caveats about
+  observational attribution.
+- 🟡 **yellow, 10 ≤ N_eff < 30** — suggestive / hypothesis-
+  generating. CIs are wide; use qualitative language
+  ("consistent with", "suggests") and cross-check against the
+  Research Compass panels.
+- 🔴 **red, N_eff < 10** — exploratory only. Do not cite. The
+  display is there so you can eyeball a pattern, not report it.
+
+**Effective N** (Bretherton et al. 1999) accounts for lag-1
+autocorrelation in the selector signal — persistent conditions
+like "below-zero ONI for the whole winter" have far fewer
+independent degrees of freedom than the nominal day count suggests.
+
+**What "Residual" means** in the Explore attribution table:
+
+- **Small residual** (|residual / observed| < 20 %) → a linear
+  combination of your chosen drivers explains the signal. You can
+  rank them by Attributable to identify the leading mechanism.
+- **Large residual** (|residual / observed| > 50 %) → the chosen
+  drivers *cannot* explain the composite via a linear relationship.
+  Three possibilities: (a) you're missing a driver in the list;
+  (b) the effect is nonlinear (MJO × ENSO interference is a classic
+  case); (c) the sample is so small that noise dominates.
+
+**Moving-block bootstrap CIs** (Künsch 1989) on the SE-US box
+time-series correlation in Tab 3 are more defensible than the
+parametric p-values shown elsewhere for the same autocorrelation
+reason. When in doubt, report the bootstrap CI.
+""")
+
+    st.markdown("---")
+    st.markdown("## Sharing and citing")
+    st.markdown("""
+**URL bookmarking.** Every control writes to `st.query_params`. When
+you reach a view worth sharing — a specific composite, a specific
+filter — just copy the browser's URL bar. Opening that URL reloads
+the exact same view.
+
+**Citation block.** The 📜 About & authorship tab has an explicit
+"How to cite" section with the app URL, the commit hash at the time
+of the view you're citing, and a paragraph you can paste into a
+bibliography. Cite the deployed Streamlit app plus the specific
+references for the method(s) you used (listed in the figure caption
+and the Methods & Data tab).
+
+**What to disclose about AI assistance.** The About tab also carries
+the explicit human / AI division-of-labor table, model IDs, and the
+git-commit authorship convention. Nothing more is needed for
+coursework — but if you submit to a journal, read the journal's
+AI-disclosure policy first; some want explicit language in the
+Methods section, others in the acknowledgments.
+
+**Limitations to carry forward.** The app's cube is Nov 2025 - Mar
+2026 only. Historical reference climatology (1991-2020) is not yet
+in the cube (coming in D4a). Statements of the form "this is the
+most X winter since year Y" are NOT supported by this app's data;
+do not cite such statements from what you see here.
+""")
+
+    with st.expander("If you're stuck — a debug checklist"):
+        st.markdown("""
+1. The map is blank → check the month selector (Tab 1) and whether
+   the variable has coverage for that month (Methods & Data tab
+   shows % NaN per variable).
+2. The composite has N = 0 → your filter is too strict. In the
+   Explore tab, remove the last row, or toggle NOT on an over-
+   restrictive row.
+3. The attribution table says "Not enough overlapping finite data"
+   → one of your chosen drivers has NaN on many days. Drop that
+   driver from the multiselect.
+4. The URL shows a view that doesn't render → someone shared a URL
+   from an older commit with different parameters. Remove the
+   query string and start fresh.
+5. You think a number is wrong → open the About tab, find the
+   relevant Phase expander, compare what the chronology says the
+   code does to what you observe. If still wrong, open an issue on
+   GitHub citing the URL.
+""")
