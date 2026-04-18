@@ -484,6 +484,62 @@ repo authored by `Eduardo Siman <esiman@msn.com>` during the AI-assisted
 sessions — every other commit is authored by Claude.
 """)
 
+    st.markdown("## Division of labor")
+
+    lab_h, lab_c = st.columns(2)
+    with lab_h:
+        st.markdown("### Eduardo Siman (human)")
+        st.markdown("""
+- Initial repository, data pipeline (`preprocess.py`), and first
+  version of `app.py` (all pre-AI).
+- All strategic direction — what to build, in what order, to what
+  quality bar.
+- Research context provided to the AI: the MPO-551 syllabus, Group 2
+  Subgroup A membership, Tori's research questionnaire verbatim, the
+  group's reference r-values from Abby's slides.
+- Quality standard: *"publication quality, Becker-understandable,
+  grounded in established methods, self-explaining."*
+- All manual data fetches from PowerShell when the sandbox was
+  firewalled — BoM RMM (stale), then NOAA PSL ROMI (current).
+- Testing: loaded the deployed Streamlit app in a browser after every
+  push, reported bugs (e.g. the scipy `stats` NameError that Claude
+  had introduced) and un-intuitive UI.
+- The single authored git commit on this repo during the AI sessions:
+  `462582b` (the ROMI data file).
+""")
+    with lab_c:
+        st.markdown("### Claude 4.7 (AI)")
+        st.markdown("""
+- All Python code added after the initial commit — in `app.py`,
+  `indices.py`, the new `stats.py`, and the new `plots.py`.
+- Selection of every statistical method used: moving-block bootstrap,
+  effective sample size via lag-1 AR, Welch's unequal-variance t-test
+  with Welch-Satterthwaite df, OLS multiple regression with OLS SEs,
+  event detection by contiguous-run thresholding, 8-phase MJO from
+  `atan2(ROMI2, ROMI1)` octants.
+- Selection of every primary-literature reference cited in the app:
+  Bretherton et al. 1999, Künsch 1989, Wilks 2011 and 2016, Welch
+  1947, von Storch & Zwiers 1999, Hersbach et al. 2020, Xie et al.
+  2007, Wheeler & Hendon 2004, Kiladis et al. 2014, Thompson & Wallace
+  1998, Hurrell 1995, Wallace & Gutzler 1981.
+- Figure design: cartopy projection choice, colormap choice, contour
+  levels, stippling density, journal-style caption templates.
+- All inline documentation text (method notes, caveats, "About this
+  analysis" expanders, figure captions).
+- All scientific interpretation shown in the app (e.g. the *"R² = 0.15
+  means 85 % of daily FL T2m variance is unexplained by seasonal
+  teleconnections, so MJO forcing is plausible"* framing).
+- All bug fixes (e.g. the NameError Eduardo reported).
+- All commits on this repo authored during the AI sessions *except*
+  `462582b` — verifiable via `git log --author=Claude`.
+""")
+
+    st.caption(
+        "This split is a statement of fact about how *this specific* app "
+        "came into existence — not a universal claim about AI-assisted "
+        "research. Other projects will have different splits."
+    )
+
 with tab_rc:
     qp_set(tab="compass")
     import matplotlib.pyplot as _plt
