@@ -55,12 +55,13 @@ VAR_META = {
 }
 
 INDEX_META = {
-    "ao":      {"label": "AO",           "cadence": "daily",   "unit": "σ"},
-    "nao":     {"label": "NAO",          "cadence": "daily",   "unit": "σ"},
-    "pna":     {"label": "PNA",          "cadence": "daily",   "unit": "σ"},
-    "qbo":     {"label": "QBO",          "cadence": "daily",   "unit": "m/s"},
-    "oni":     {"label": "ONI (ENSO)",   "cadence": "monthly", "unit": "°C"},
-    "mjo_amp": {"label": "MJO amplitude","cadence": "daily",   "unit": "σ"},
+    "ao":          {"label": "AO",            "cadence": "daily",   "unit": "σ"},
+    "nao":         {"label": "NAO",           "cadence": "daily",   "unit": "σ"},
+    "pna":         {"label": "PNA",           "cadence": "daily",   "unit": "σ"},
+    "pna_monthly": {"label": "PNA (monthly)", "cadence": "monthly", "unit": "σ"},
+    "qbo":         {"label": "QBO",           "cadence": "daily",   "unit": "m/s"},
+    "oni":         {"label": "ONI (ENSO)",    "cadence": "monthly", "unit": "°C"},
+    "mjo_amp":     {"label": "MJO amplitude", "cadence": "daily",   "unit": "σ"},
 }
 
 REFERENCE_R = {
@@ -90,9 +91,13 @@ PROVENANCE = [
     {"variable": "precip", "source": PRECIP_SOURCE,
      "period": "2025-11-01 → 2026-03-31", "climatology": "— (not anomalized here)",
      "resolution": "0.5° native → 0.25° interpolated", "doi_ref": "Xie et al. 2007, J. Hydromet. 8, 607-626"},
-    {"variable": "AO, NAO, PNA", "source": "NOAA CPC daily teleconnection indices",
+    {"variable": "AO, NAO, PNA (daily)", "source": "NOAA CPC daily teleconnection indices",
      "period": "daily, 1950-present", "climatology": "CPC normalisation",
      "resolution": "—", "doi_ref": "https://www.cpc.ncep.noaa.gov/products/precip/CWlink/"},
+    {"variable": "PNA (monthly)",
+     "source": "NOAA CPC norm.pna.monthly.b5001.current.ascii (within-month mean of daily PNA, CPC normalisation)",
+     "period": "monthly, 1950-present", "climatology": "CPC normalisation (b5001)",
+     "resolution": "—", "doi_ref": "Wallace & Gutzler 1981, Mon. Wea. Rev. 109, 784-812"},
     {"variable": "QBO", "source": "NOAA CPC QBO 30 hPa zonal-mean u-wind",
      "period": "monthly", "climatology": "—",
      "resolution": "—", "doi_ref": "Naujokat 1986, J. Atmos. Sci. 43, 1873-1877"},
@@ -542,6 +547,62 @@ own smoke test.
 provenance table now reads period = `2025-11-01 → 2026-03-31`. Source
 attribution (CPC Global PRCP V1.0; Chen et al. 2008 / Xie et al. 2007)
 is unchanged.
+""")
+
+    with st.expander("**Session 2, Phase 4 — D6: monthly PNA index (micro)**",
+                     expanded=False):
+        st.markdown("""
+**Prompt context by Eduardo.** After D3 landed on `main` and the
+deployment passed smoke checks, the next item in the risk-ascending
+queue was D6: add NOAA CPC's native monthly PNA series to the app
+alongside the existing daily PNA.
+
+**Precise scope of this commit (D6 only):**
+
+1. Add `data/indices/pna_monthly.txt` (19 KB, 914 rows, Jan 1950 -
+   Feb 2026), extracted verbatim from the New Downloaded Files
+   zip-003 (`norm.pna.monthly.b5001.current.ascii`). CPC's own
+   within-month mean of the daily PNA, not a post-hoc resample.
+2. Add `parse_monthly_pna()` to `indices.py` and register it in
+   `load_all_indices()` so `indices["pna_monthly"]` loads at startup.
+3. Add `pna_monthly` to `INDEX_META` in `app.py` with
+   `cadence="monthly"`. This makes it auto-available in:
+   - Tab 2 "Indices" multi-select (renders as a bar chart in the
+     Monthly view, sparse points in the Daily view).
+   - Tab 2 monthly correlation table (compared to Abby's reference
+     r-values on the same native-monthly cadence CPC uses).
+   - Tab 3 "Composites & Correlations" index dropdown (the existing
+     `align_index_to_cube` forward-fills monthly values to daily,
+     matching the pattern already used for ONI).
+4. Add a provenance row for "PNA (monthly)" in the Methods & Data
+   tab, citing Wallace & Gutzler (1981).
+
+**What Claude 4.7 did** (Eduardo wrote no code during this phase):
+
+- Wrote `scripts/d6_extract_pna_monthly.py` (idempotent one-shot
+  extractor from zip-003 to the repo's indices folder) and the
+  indices parser.
+- Threaded the new index through `INDEX_META` and `PROVENANCE`.
+- Added this chronology expander.
+
+**Why native monthly, not resampled daily? (Validation result.)**
+I had expected the CPC native-monthly PNA to agree with a naive
+`to_monthly()` resample of the daily PNA to ≥ 3 decimal places.
+It does not. Over the 914 months of overlap (Jan 1950 - Feb 2026),
+the two series differ with **mean |Δ| = 0.43 σ, max |Δ| = 1.87 σ,
+median |Δ| = 0.35 σ**. This is large and surprising — ~40 % of a
+standard deviation on average. CPC applies its own normalization and
+QC to each month independently (`b5001` base, the same base the
+daily series uses), and the two products should not be used
+interchangeably. The **native-monthly file is the correct one to
+compare against published monthly r-values** like Abby's deck
+(slide 47, r = -0.113). The resampled-daily curve is kept in the app
+for methodological transparency (the Tab 2 monthly correlation table
+still computes it so you can see both), but any citable monthly
+statistic should use `pna_monthly`.
+
+**No runtime changes to T2m, Z500, precip, or any other index.** This
+commit is purely additive at the index layer.
 """)
 
     st.markdown("## Division of labor")

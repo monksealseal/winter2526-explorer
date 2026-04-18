@@ -96,6 +96,31 @@ def parse_oni(path) -> pd.Series:
     return pd.Series(dict(rows)).sort_index()
 
 
+def parse_monthly_pna(path) -> pd.Series:
+    """Parse NOAA CPC's normalized *monthly* PNA series.
+
+    File layout (whitespace-delimited, no header):
+        year  month  value
+
+    Dated to the first of each month. Distinct from ``parse_daily_ao_nao_pna``,
+    which reads a four-column daily file. The two series share the same
+    CPC normalization base (1950-01-01 through the current month), so the
+    monthly values are the within-month means of the daily values published
+    by CPC — NOT a post-hoc resample of the daily series.
+
+    Source: ``norm.pna.monthly.b5001.current.ascii``
+    (CPC Climate Diagnostics Center teleconnection feed).
+    """
+    df = pd.read_csv(path, sep=r"\s+", header=None,
+                     names=["Year", "Month", "Value"],
+                     na_values=["-9.9", "-99.9", "*"])
+    df["Date"] = pd.to_datetime(
+        dict(year=df.Year, month=df.Month, day=1), errors="coerce")
+    return (df.dropna(subset=["Date"])
+              .set_index("Date")["Value"]
+              .astype(float).sort_index())
+
+
 def parse_mjo_rmm(path) -> pd.DataFrame:
     rows = []
     with open(path) as f:
@@ -139,11 +164,12 @@ def load_all_indices(indices_dir) -> dict:
     indices_dir = Path(indices_dir)
     out = {}
     parsers = [
-        ("ao",  "ao.csv",  parse_daily_ao_nao_pna),
-        ("nao", "nao.csv", parse_daily_ao_nao_pna),
-        ("pna", "pna.txt", parse_daily_ao_nao_pna),
-        ("qbo", "qbo.csv", parse_qbo),
-        ("oni", "oni.txt", parse_oni),
+        ("ao",          "ao.csv",          parse_daily_ao_nao_pna),
+        ("nao",         "nao.csv",         parse_daily_ao_nao_pna),
+        ("pna",         "pna.txt",         parse_daily_ao_nao_pna),
+        ("qbo",         "qbo.csv",         parse_qbo),
+        ("oni",         "oni.txt",         parse_oni),
+        ("pna_monthly", "pna_monthly.txt", parse_monthly_pna),
     ]
     for key, fname, parser in parsers:
         p = indices_dir / fname
