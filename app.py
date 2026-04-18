@@ -281,6 +281,31 @@ The rest of this page gives a step-by-step chronology, data-provenance
 detail, a methods list with citations, and a How-to-cite block.
 """)
 
+    st.markdown("## Tools used")
+    st.markdown("""
+- **Claude 4.7** — Anthropic's large language model. Specific model ID:
+  `claude-opus-4-7` (the "Opus" tier of Claude 4.7, used with the 1M-token
+  context window variant). Provider: Anthropic, via the Claude Code CLI.
+- **Claude Code** — Anthropic's command-line coding harness. Runs the
+  model inside a sandboxed Linux environment with tool access (file I/O,
+  Bash, Python execution, web search). The sandbox blocks direct HTTP
+  access to most scientific data hosts (BoM, NOAA PSL, CPC, IRI), which
+  is the reason the human had to fetch ROMI and index files manually
+  from a local PowerShell session.
+- **Git / GitHub** — source control; the full commit history of this app
+  is a faithful record of who changed what and when. Every commit
+  authored by the AI is tagged `Author: Claude <noreply@anthropic.com>`;
+  every commit authored by the human is tagged `Author: Eduardo Siman
+  <esiman@msn.com>`. See the repo's commit log for verification.
+- **Streamlit Community Cloud** — hosts the live deployment. Auto-deploys
+  from the `main` branch of
+  [`monksealseal/winter2526-explorer`](https://github.com/monksealseal/winter2526-explorer).
+- **Prompting medium** — the human communicated with the model
+  exclusively through natural-language prompts typed into Claude Code.
+  No custom fine-tuning or prompt templates were used beyond Claude
+  Code's default system prompt.
+""")
+
 with tab_rc:
     qp_set(tab="compass")
     import matplotlib.pyplot as _plt
