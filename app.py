@@ -435,6 +435,55 @@ reporting the traceback; Claude fixed it within the same session).
 Net diff for Phase 2.1: ~1200 insertions, ~150 deletions across 5 files.
 """)
 
+    with st.expander("**Session 1, Phase 2.2 — MJO data sourcing (human did the fetching)**",
+                     expanded=False):
+        st.markdown("""
+The Research-compass panels Q2, Q3, Q4 depend on a daily MJO-phase
+index. The Claude Code sandbox blocks outbound HTTP to the canonical
+scientific hosts (bom.gov.au, psl.noaa.gov, cpc.ncep.noaa.gov,
+iridl.ldeo.columbia.edu) — they all return `403 Host not in allowlist`.
+Claude therefore could not download MJO data itself.
+
+**What Eduardo did** (from a local PowerShell session on his machine,
+where those hosts are reachable):
+
+1. Ran an initial fetch of the BoM Wheeler-Hendon RMM file
+   (`rmm.74toRealtime.txt`). The file downloaded successfully but
+   parser-side checks revealed it stalled updating in February 2024 —
+   the canonical BoM feed had effectively been abandoned.
+2. After several diagnostic round-trips with Claude (trying NOAA CPC
+   and IRI mirror URLs, all dead), Eduardo located the working source:
+   NOAA PSL's real-time OLR-based MJO index
+   `https://psl.noaa.gov/mjo/mjoindex/romi.cpcolr.1x.txt`, current
+   through 2026-04-16.
+3. Downloaded ROMI with a one-line `urllib.request` script in PowerShell
+   and committed it as [`462582b`](https://github.com/monksealseal/winter2526-explorer/commit/462582b)
+   (`Add ROMI MJO index data (1991 - 2026-04-16)`, 12 890 daily records,
+   644 KB).
+
+**What Claude 4.7 did** in response:
+
+- Added `parse_romi()` to `indices.py` that reads the PSL format
+  (`year month day flag ROMI1 ROMI2 amplitude`) and derives phase
+  1-8 from `atan2(ROMI2, ROMI1)` using the Wheeler & Hendon (2004)
+  octant convention.
+- Updated `load_all_indices()` to prefer ROMI over the stale RMM file
+  when both are present and to tag the active source via
+  `indices["mjo_source"]`.
+- Added Kiladis et al. (2014) to the bibliography and a new ROMI row
+  to the Methods & Data provenance table.
+- Updated the Research-compass MJO status banner to name the active
+  source and flag staleness if the last date is more than 30 days old.
+
+Landed as commits
+[`d67e099`](https://github.com/monksealseal/winter2526-explorer/commit/d67e099)
+(Claude's code changes) and
+[`462582b`](https://github.com/monksealseal/winter2526-explorer/commit/462582b)
+(Eduardo's data commit). The data commit is the *only* commit on this
+repo authored by `Eduardo Siman <esiman@msn.com>` during the AI-assisted
+sessions — every other commit is authored by Claude.
+""")
+
 with tab_rc:
     qp_set(tab="compass")
     import matplotlib.pyplot as _plt
