@@ -340,6 +340,35 @@ the sole author. The initial commit is
 (*"Initial Winter 25-26 Explorer"*), authored Apr 18 2026 03:18 UTC.
 """)
 
+    with st.expander("**Session 1, Phase 1 — monthly aggregations (same day)**", expanded=False):
+        st.markdown("""
+**Prompt by Eduardo** (paraphrased for brevity; full prompt is in session
+transcript): *"Enhance the app with Phase 1 improvements: add monthly
+index aggregations to Tab 2 with a Daily/Monthly toggle; add Z500
+anomaly to the Tab 1 variable selector; enhance negative-phase
+composite documentation in Tab 3."*
+
+**What Claude 4.7 did:**
+
+1. Added `to_monthly()` helper to `indices.py` — resamples daily-cadence
+   indices (AO, NAO, PNA, QBO) to month-start means with a configurable
+   ≥15-valid-days gate.
+2. Added a Daily / Monthly radio to Tab 2's left column. In Monthly mode,
+   indices render as bar charts and the correlation table recomputes on
+   monthly-mean index × monthly-mean SE-US T2m anomaly — matching the
+   cadence behind the group's reference r-values. View state is
+   URL-shareable via `&view=monthly`.
+3. Added an interpretive caption in Tab 1 that appears when `z500_anom`
+   is selected (red = ridge/high, blue = trough/low; PNA-positive =
+   Alaska ridge + eastern-US trough).
+4. Expanded Tab 3's threshold-radio help text and composite-map caption
+   so the (positive − negative) direction and negative-phase reading
+   are explicit.
+
+Landed on `main` as commit [`4fb19f4`](https://github.com/monksealseal/winter2526-explorer/commit/4fb19f4).
+Two files changed (`app.py`, `indices.py`); 137 insertions, 37 deletions.
+""")
+
 with tab_rc:
     qp_set(tab="compass")
     import matplotlib.pyplot as _plt
