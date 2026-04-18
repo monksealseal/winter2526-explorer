@@ -237,6 +237,404 @@ tab_rc, tab1, tab2, tab3, tab4 = st.tabs([
     "Methods & Data",
 ])
 
+# ==================================================================
+# Tab RC: Research Compass — purpose-built panels for Tori's proposal
+# ==================================================================
+with tab_rc:
+    qp_set(tab="compass")
+    import matplotlib.pyplot as _plt
+
+    st.header("🧭 Research compass — Tori's project questions")
+    st.caption(
+        "Each card below is anchored to a specific question from the group's "
+        "research proposal. Figures and statistics are pre-configured with defaults "
+        "that answer that question directly. Open **Composites & Correlations** for "
+        "unconstrained exploration with the same methods."
+    )
+
+    # ---- MJO data status banner ----
+    if not MJO_LOADED:
+        st.warning(
+            "**MJO RMM data not loaded.** Questions Q2, Q3, Q4 depend on the "
+            "Wheeler & Hendon (2004) RMM1/RMM2 daily phase index. This sandbox "
+            "can't fetch from bom.gov.au or psl.noaa.gov (firewalled). Run the "
+            "fetch locally and commit the file:\n\n"
+            "```bash\n"
+            "python -c \"from indices import fetch_mjo; from pathlib import Path; "
+            "print(fetch_mjo(Path('data/indices/mjo_rmm.txt')))\"\n"
+            "git add data/indices/mjo_rmm.txt\n"
+            "git commit -m 'Add MJO RMM' && git push\n"
+            "```"
+        )
+    else:
+        _mjo = indices["mjo"]
+        _winter_days = int(((_mjo.index >= cube.time.min().values) &
+                            (_mjo.index <= cube.time.max().values)).sum())
+        st.success(
+            f"✓ MJO RMM loaded — {len(_mjo):,} total days, "
+            f"{_winter_days} days covering this winter window "
+            f"({str(cube.time.min().values)[:10]} → {str(cube.time.max().values)[:10]})."
+        )
+
+    # Shared daily series used across the panels
+    _cube_time = cube.time.values
+    _dt_idx = pd.DatetimeIndex([pd.Timestamp(t).normalize() for t in _cube_time])
+    fl_t2m_daily = (box_mean(cube.t2m_anom, FLORIDA_BOX)
+                    .to_series().reindex(_dt_idx))
+    se_t2m_daily = (box_mean(cube.t2m_anom, SE_US_BOX)
+                    .to_series().reindex(_dt_idx))
+
+    # ===== Q1: What were the coldest weeks over Florida? =====
+    st.markdown("---")
+    st.markdown("### Q1 · What were the coldest weeks over Florida?")
+    st.caption(
+        "*Method: contiguous runs of ≥N days with Florida-box mean T2m anomaly "
+        "below a user threshold. Identifies the specific periods deserving focused "
+        "dynamical diagnosis. "
+        "Florida box: "
+        f"{FLORIDA_BOX['lat_min']}-{FLORIDA_BOX['lat_max']}°N, "
+        f"{abs(FLORIDA_BOX['lon_max'])}-{abs(FLORIDA_BOX['lon_min'])}°W.*"
+    )
+    q1c1, q1c2 = st.columns([1, 3])
+    with q1c1:
+        q1_thresh = st.slider("Threshold (°C anom)", -8.0, 0.0,
+                              qp_get("q1_thr", -2.0, float), step=0.5, key="q1_thresh",
+                              help="FL-box mean T2m anomaly must be below this value.")
+        q1_min_days = st.slider("Min duration (days)", 1, 10,
+                                qp_get("q1_min", 3, int), key="q1_min_days")
+        qp_set(q1_thr=q1_thresh, q1_min=q1_min_days)
+    # Event detection
+    meets = (fl_t2m_daily < q1_thresh).fillna(False).values
+    events = []
+    i = 0
+    while i < len(meets):
+        if meets[i]:
+            j = i
+            while j < len(meets) and meets[j]:
+                j += 1
+            run_idx = _dt_idx[i:j]
+            if len(run_idx) >= q1_min_days:
+                period = fl_t2m_daily.loc[run_idx[0]:run_idx[-1]]
+                events.append({
+                    "start": run_idx[0].date(),
+                    "end": run_idx[-1].date(),
+                    "duration (d)": len(run_idx),
+                    "peak date": period.idxmin().date(),
+                    "min T2m anom (°C)": f"{period.min():+.2f}",
+                    "mean T2m anom (°C)": f"{period.mean():+.2f}",
+                })
+            i = j
+        else:
+            i += 1
+    with q1c2:
+        fig_q1 = go.Figure()
+        fig_q1.add_trace(go.Scatter(x=fl_t2m_daily.index, y=fl_t2m_daily.values,
+                                     mode="lines",
+                                     line=dict(color="#333", width=1.2),
+                                     name="FL T2m anom"))
+        fig_q1.add_hline(y=q1_thresh, line=dict(color="steelblue", dash="dash", width=1),
+                         annotation_text=f"threshold = {q1_thresh}°C",
+                         annotation_position="top left")
+        for e in events:
+            fig_q1.add_vrect(x0=e["start"], x1=e["end"],
+                             fillcolor="steelblue", opacity=0.18, line_width=0)
+        fig_q1.update_layout(
+            title="Florida-box T2m anomaly with cold events shaded",
+            height=300, margin=dict(l=60, r=20, t=50, b=40),
+            yaxis_title="T2m anom (°C)", xaxis_title="")
+        st.plotly_chart(fig_q1, use_container_width=True)
+    if events:
+        st.dataframe(pd.DataFrame(events), hide_index=True, use_container_width=True)
+        st.markdown(
+            f"**Interpretation:** {len(events)} cold event(s) detected over Florida "
+            f"this winter (threshold = {q1_thresh}°C, ≥{q1_min_days} days). "
+            "The peak dates in this table are the natural anchor points for the "
+            "MJO-phase, Z500-anomaly, and wave-train diagnostics below."
+        )
+    else:
+        st.info(f"No cold events with threshold {q1_thresh}°C and ≥{q1_min_days} days.")
+
+    # ===== Q5: Were seasonal teleconnections sufficient? =====
+    st.markdown("---")
+    st.markdown("### Q5 · Were seasonal teleconnections sufficient to explain Florida cold anomalies?")
+    st.caption(
+        "*Method: ordinary-least-squares multiple regression of daily Florida T2m "
+        "anomaly on AO, NAO, PNA, and ONI. If R² is low, these four modes leave "
+        "a lot of variance unexplained — consistent with sub-seasonal (MJO) or "
+        "other drivers. The residual is the 'what's left over' time series, which "
+        "should align with MJO phase if Tori's hypothesis holds.*"
+    )
+    X_cols = {}
+    for k in ("ao", "nao", "pna", "oni"):
+        if k in indices:
+            X_cols[k] = align_index_to_cube(indices[k], _cube_time).values
+    if len(X_cols) < 2:
+        st.warning("Need at least 2 teleconnection indices loaded for this panel.")
+    else:
+        y_series = fl_t2m_daily.copy()
+        X_df = pd.DataFrame(X_cols, index=_dt_idx)
+        data = pd.concat([y_series.rename("fl_t2m"), X_df], axis=1).dropna()
+        if len(data) < 30:
+            st.warning(f"Insufficient overlapping daily data (n = {len(data)}).")
+        else:
+            y_arr = data["fl_t2m"].values
+            X_arr = np.column_stack([np.ones(len(data)), data[list(X_cols.keys())].values])
+            beta, *_ = np.linalg.lstsq(X_arr, y_arr, rcond=None)
+            yhat = X_arr @ beta
+            residual = y_arr - yhat
+            n_obs, k_reg = len(y_arr), X_arr.shape[1]
+            ss_res = float(np.sum(residual ** 2))
+            ss_tot = float(np.sum((y_arr - y_arr.mean()) ** 2))
+            r_sq = 1.0 - ss_res / ss_tot
+            adj_r_sq = 1.0 - (1.0 - r_sq) * (n_obs - 1) / (n_obs - k_reg)
+            sigma2 = ss_res / (n_obs - k_reg)
+            try:
+                cov = sigma2 * np.linalg.inv(X_arr.T @ X_arr)
+                se_coef = np.sqrt(np.diag(cov))
+                t_coef = beta / se_coef
+                p_coef = 2.0 * (1.0 - stats.t.cdf(np.abs(t_coef), df=n_obs - k_reg))
+            except np.linalg.LinAlgError:
+                se_coef = np.full_like(beta, np.nan)
+                t_coef = np.full_like(beta, np.nan)
+                p_coef = np.full_like(beta, np.nan)
+
+            names = ["intercept"] + list(X_cols.keys())
+            reg_df = pd.DataFrame({
+                "regressor": names,
+                "β": [f"{b:+.3f}" for b in beta],
+                "SE": [f"{s:.3f}" for s in se_coef],
+                "t": [f"{t:+.2f}" for t in t_coef],
+                "p (OLS)": [f"{p:.3g}" for p in p_coef],
+            })
+            q5c1, q5c2 = st.columns([1, 2])
+            with q5c1:
+                st.metric("R² (variance explained)", f"{r_sq*100:.1f}%")
+                st.metric("Adjusted R²", f"{adj_r_sq*100:.1f}%")
+                st.metric("Sample size n (days)", f"{n_obs}")
+                st.dataframe(reg_df, hide_index=True, use_container_width=True)
+            with q5c2:
+                fig_q5 = go.Figure()
+                fig_q5.add_trace(go.Scatter(x=data.index, y=y_arr, mode="lines",
+                                             name="observed FL T2m anom",
+                                             line=dict(color="black", width=1.2)))
+                fig_q5.add_trace(go.Scatter(x=data.index, y=yhat, mode="lines",
+                                             name=f"explained by {'+'.join(X_cols)}",
+                                             line=dict(color="#d95f02", width=1.2)))
+                fig_q5.add_trace(go.Scatter(x=data.index, y=residual, mode="lines",
+                                             name="residual (unexplained)",
+                                             line=dict(color="steelblue", width=1, dash="dot")))
+                fig_q5.add_hline(y=0, line=dict(color="#999", width=0.4))
+                fig_q5.update_layout(
+                    title="FL T2m anomaly · observed vs. teleconnection-explained vs. residual",
+                    height=360, margin=dict(l=60, r=20, t=50, b=40),
+                    yaxis_title="T2m anom (°C)", legend=dict(orientation="h"))
+                st.plotly_chart(fig_q5, use_container_width=True)
+
+            st.markdown(
+                f"**Interpretation.** The four seasonal teleconnections "
+                f"({', '.join(k.upper() for k in X_cols)}) jointly explain "
+                f"**{r_sq*100:.1f}%** of daily FL T2m anomaly variance this winter "
+                f"(adjusted R² = {adj_r_sq*100:.1f}%). The remaining "
+                f"**{(1-r_sq)*100:.1f}%** is the residual time series plotted in blue "
+                f"— the part that seasonal modes *cannot* account for. If Tori's "
+                f"hypothesis holds, this residual should show structure around the "
+                f"cold-event windows identified in Q1 and should correlate with "
+                f"MJO phase at 5-15-day leads."
+            )
+            st.caption(
+                "Caveat: OLS standard errors assume independent residuals, which is "
+                "false for autocorrelated daily data — the OLS p-values above are "
+                "anti-conservative. Treat significance as indicative; for "
+                "publication use Newey-West (HAC) SEs or a block bootstrap."
+            )
+
+    # ===== Q2: Did MJO phases modulate Florida T2m? =====
+    st.markdown("---")
+    st.markdown("### Q2 · Did MJO phases modulate Florida T2m anomalies at 5-15 day leads?")
+    st.caption(
+        "*Method: 8-phase composite of FL T2m anomaly at lags 0, 5, 10, 15 days. "
+        "Only days with MJO amplitude ≥ 1 are counted (phase is noisy below that). "
+        "Tori's a-priori hypothesis: phases 7-8 (enhanced convection over the "
+        "Western Hemisphere/Africa) should favour eastern-US cold at +10 days.*"
+    )
+    if not MJO_LOADED:
+        st.info("*MJO RMM data required — see banner at top of this tab.*")
+    else:
+        mjo = indices["mjo"]  # DataFrame: RMM1, RMM2, phase, amplitude
+        lags = [0, 5, 10, 15]
+        phases = list(range(1, 9))
+        grid = np.full((len(lags), len(phases)), np.nan)
+        counts = np.zeros_like(grid, dtype=int)
+        for li, lag in enumerate(lags):
+            # index at t-lag predicts FL T2m at t, so shift MJO forward by `lag`
+            mjo_lagged = mjo.reindex(_dt_idx, method="nearest", tolerance=pd.Timedelta(days=1)).shift(lag)
+            active = mjo_lagged["amplitude"] >= 1.0
+            for pj, ph in enumerate(phases):
+                mask = active & (mjo_lagged["phase"] == ph)
+                mask_arr = mask.fillna(False).values
+                if mask_arr.sum() >= 3:
+                    grid[li, pj] = float(np.nanmean(fl_t2m_daily.values[mask_arr]))
+                    counts[li, pj] = int(mask_arr.sum())
+        fig_q2 = go.Figure(data=go.Heatmap(
+            z=grid, x=[f"Phase {p}" for p in phases],
+            y=[f"lag +{lag}d" for lag in lags],
+            colorscale="RdBu_r", zmid=0,
+            hovertemplate="%{y} · %{x}<br>mean T2m anom = %{z:+.2f}°C<extra></extra>",
+            colorbar=dict(title="FL T2m anom (°C)"),
+            text=[[f"n={counts[li,pj]}" for pj in range(8)] for li in range(len(lags))],
+            texttemplate="%{text}", textfont=dict(size=9, color="black"),
+        ))
+        fig_q2.update_layout(
+            title="Florida T2m anomaly composite · by MJO phase × lag (amp ≥ 1 only)",
+            height=320, margin=dict(l=80, r=20, t=50, b=40))
+        st.plotly_chart(fig_q2, use_container_width=True)
+        st.caption(
+            f"Each cell: mean FL T2m anomaly on days when the MJO was in that phase "
+            f"with amplitude ≥ 1, at the stated lag (positive lag = MJO leads). "
+            f"n shown in-cell. With only {cube.sizes['time']} winter days, any phase × "
+            f"lag bin with n < 5-8 should be read cautiously. "
+            f"Reference: Wheeler & Hendon (2004), Mon. Wea. Rev. 132, 1917-1932."
+        )
+
+    # ===== Q3: Did MJO phases 7-8 enhance cold-air outbreaks? =====
+    st.markdown("---")
+    st.markdown("### Q3 · Did MJO phases 7-8 enhance eastern-US troughing / cold outbreaks?")
+    st.caption(
+        "*Method: lagged Z500-anomaly composite over CONUS on days when MJO was "
+        "in phase 7 or 8 (amplitude ≥ 1). Expect (a priori): an eastern-US trough "
+        "developing at +5 to +15 days through a Rossby wave train forced by "
+        "enhanced WH/African convection.*"
+    )
+    if not MJO_LOADED:
+        st.info("*MJO RMM data required — see banner at top of this tab.*")
+    else:
+        mjo = indices["mjo"]
+        lats, lons = cube.latitude.values, cube.longitude.values
+        z500_anom = cube.z500_anom.values  # (T, H, W)
+        cols = st.columns(4)
+        for li, lag in enumerate([0, 5, 10, 15]):
+            mjo_lagged = mjo.reindex(_dt_idx, method="nearest",
+                                     tolerance=pd.Timedelta(days=1)).shift(lag)
+            mask = ((mjo_lagged["phase"].isin([7, 8])) &
+                    (mjo_lagged["amplitude"] >= 1.0)).fillna(False).values
+            n_days = int(mask.sum())
+            with cols[li]:
+                if n_days < 3:
+                    st.info(f"lag +{lag}d · n={n_days} (insufficient)")
+                else:
+                    comp = np.nanmean(z500_anom[mask], axis=0)
+                    fig_q3 = make_map(
+                        lats, lons, comp,
+                        cmap="RdBu_r", center_on_zero=True,
+                        title=f"lag +{lag}d (n={n_days})",
+                        subtitle=f"MJO phase 7-8, amp ≥ 1",
+                        caption="", units="Z500 anom (m)",
+                        figsize=(4.5, 2.8),
+                        highlight_boxes=[{**FLORIDA_BOX, "label": "FL"}],
+                        contour_levels=np.arange(-300, 301, 60),
+                    )
+                    st.pyplot(fig_q3, use_container_width=True)
+                    _plt.close(fig_q3)
+        st.caption(
+            "A ridge over the Gulf of Alaska with a downstream eastern-US trough "
+            "at +5 to +15 days is the canonical phase-7/8 signature (Johnson et al. "
+            "2014, Mon. Wea. Rev. 142, 1556-1577). Climatology baseline: "
+            f"{Z500_CLIMO_BASE}."
+        )
+
+    # ===== Q4: MJO × ENSO joint conditional =====
+    st.markdown("---")
+    st.markdown("### Q4 · Constructive interference between MJO and ENSO?")
+    st.caption(
+        "*Method: 2×2 conditional composite of CONUS T2m anomaly at +10 day lag. "
+        "Rows split MJO phase (1-2 vs 7-8 at amplitude ≥ 1); columns split ENSO "
+        "state (ONI ≤ -0.5 = La Niña-ish vs ONI > -0.5 = neutral/warm). "
+        "Tests whether the MJO effect depends on the ENSO background — the "
+        "'constructive interference' framing in Tori's proposal.*"
+    )
+    if not MJO_LOADED:
+        st.info("*MJO RMM data required — see banner at top of this tab.*")
+    elif "oni" not in indices:
+        st.warning("*ONI index not loaded; cannot condition on ENSO state.*")
+    else:
+        mjo = indices["mjo"]
+        lats, lons = cube.latitude.values, cube.longitude.values
+        t2m_anom_arr = cube.t2m_anom.values
+        lag_q4 = 10
+        mjo_lagged = mjo.reindex(_dt_idx, method="nearest",
+                                 tolerance=pd.Timedelta(days=1)).shift(lag_q4)
+        oni_aligned = pd.Series(
+            align_index_to_cube(indices["oni"], _cube_time).values,
+            index=_dt_idx)
+        amp_ok = mjo_lagged["amplitude"] >= 1.0
+        mjo_groups = {
+            "MJO phase 1-2 (enhanced Pacific conv.)": mjo_lagged["phase"].isin([1, 2]) & amp_ok,
+            "MJO phase 7-8 (enhanced WH/Africa conv.)": mjo_lagged["phase"].isin([7, 8]) & amp_ok,
+        }
+        enso_groups = {
+            "Weak La Niña (ONI ≤ -0.5)": oni_aligned <= -0.5,
+            "Neutral / warm (ONI > -0.5)": oni_aligned > -0.5,
+        }
+        rows_q4 = list(mjo_groups.keys())
+        cols_q4 = list(enso_groups.keys())
+        grid_cols = st.columns(len(cols_q4))
+        for ci, (enso_label, enso_mask) in enumerate(enso_groups.items()):
+            with grid_cols[ci]:
+                st.markdown(f"**{enso_label}**")
+                for mjo_label, mjo_mask in mjo_groups.items():
+                    joint = (mjo_mask & enso_mask).fillna(False).values
+                    n_days = int(joint.sum())
+                    if n_days < 3:
+                        st.info(f"{mjo_label} · n={n_days} (insufficient)")
+                        continue
+                    comp = np.nanmean(t2m_anom_arr[joint], axis=0)
+                    fig_q4 = make_map(
+                        lats, lons, comp,
+                        cmap="RdBu_r", center_on_zero=True,
+                        title=f"{mjo_label}",
+                        subtitle=f"+{lag_q4}d lag · n={n_days} days",
+                        caption="", units="T2m anom (°C)",
+                        figsize=(5.0, 3.0),
+                        highlight_boxes=[{**FLORIDA_BOX, "label": "FL"}],
+                    )
+                    st.pyplot(fig_q4, use_container_width=True)
+                    _plt.close(fig_q4)
+        st.caption(
+            "Compare the phase 7-8 row across the two ENSO columns: stronger cold "
+            "over Florida under weak La Niña than under neutral would indicate "
+            "constructive interference. With only ~150 winter days split four ways, "
+            "any single cell is drawn from tens of days at most — treat differences "
+            "between the four panels as suggestive, not conclusive. Climatology "
+            f"baseline: {T2M_CLIMO_BASE}."
+        )
+
+    # ===== Deferred questions =====
+    st.markdown("---")
+    with st.expander("Deferred questions — need additional data"):
+        st.markdown(f"""
+- **Q6. How did 2025-26 compare to previous La Niña winters?**
+  Needs daily ERA5 T2m and Z500 for 2016-17, 2017-18, 2020-21, 2021-22, 2022-23
+  (i.e. the La Niña members of the 2016-2024 climatology period). Current
+  cube only covers 2025-11 → 2026-03.
+  *Scope:* extend `preprocess.py` to write a `cube_lanina_winters.nc` bundle;
+  estimated +50-80 MB. Analysis then = monthly cosine-similarity analog search
+  (Van den Dool 1994; Lorenz 1969) of this winter's Z500 / T2m anomalies against
+  each prior La Niña month.
+
+- **Q7. Rossby wave-train mechanism ("inspired by Kathy").**
+  Needs Z500 across the full Northern Hemisphere, not just CONUS (−125 to −67°E).
+  Current cube is CONUS-bounded.
+  *Scope:* extend `preprocess.py` to regrid hemispheric Z500; estimated
+  +30-50 MB. Analysis = longitude-time Hovmöller of Z500 anomaly averaged over
+  30-60°N, plus (optionally) Takaya-Nakamura (2001) wave-activity flux vectors
+  overlaid on composite Z500 maps.
+
+- **Q8. 250-mb jet-stream configuration.**
+  Needs `u250` (and ideally `v250`) added to `preprocess.py`.
+  *Scope:* +2 variables on current grid; estimated +15 MB. Analysis = jet-axis
+  diagnostic (latitude of 250 mb u-wind max by longitude) and variance maps.
+""")
+
 with tab1:
     months = {"Dec 2025": "2025-12", "Jan 2026": "2026-01", "Feb 2026": "2026-02", "Mar 2026": "2026-03"}
     c1, c2 = st.columns([1, 3])
