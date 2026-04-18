@@ -20,6 +20,44 @@ def to_monthly(series: pd.Series, min_days: int = 15) -> pd.Series:
     return monthly.where(counts >= min_days)
 
 
+def parse_romi(path) -> pd.DataFrame:
+    """Parse the NOAA PSL ROMI (Real-time OLR-based MJO Index) file.
+
+    File layout (whitespace-delimited, no header):
+        year  month  day  flag  ROMI1  ROMI2  amplitude
+
+    The 4th column is a method/QC flag (currently 0) and is ignored.
+    ``amplitude`` is provided directly; ``phase`` (1-8) is derived from
+    (ROMI1, ROMI2) using the Wheeler & Hendon (2004) octant convention
+    so downstream code can treat ROMI and RMM interchangeably.
+
+    Returns a DataFrame indexed by date with columns
+    ``[RMM1, RMM2, phase, amplitude]``.
+
+    Reference: Kiladis, G. N., J. Dias, K. H. Straub, M. C. Wheeler,
+    S. N. Tulich, K. Kikuchi, K. M. Weickmann, and M. J. Ventrice, 2014:
+    A comparison of OLR and circulation-based indices for tracking the MJO.
+    Mon. Wea. Rev., 142, 1697-1715.
+    """
+    df = pd.read_csv(
+        path, sep=r"\s+", header=None,
+        names=["year", "month", "day", "flag", "RMM1", "RMM2", "amplitude"],
+        comment="#",
+    )
+    df["Date"] = pd.to_datetime(
+        dict(year=df["year"], month=df["month"], day=df["day"]),
+        errors="coerce")
+    df = (df.dropna(subset=["Date"])
+            .set_index("Date").sort_index())
+    # Derive phase 1-8 from (RMM1, RMM2) octant.
+    # atan2 returns in (-π, π]; shift so phase 1 starts at -π (SW corner)
+    # and increments counter-clockwise, matching Wheeler & Hendon (2004) Fig 7.
+    angle = np.arctan2(df["RMM2"].to_numpy(), df["RMM1"].to_numpy())
+    phase = np.floor((angle + np.pi) / (np.pi / 4.0)).astype(int) + 1
+    df["phase"] = np.clip(phase, 1, 8)
+    return df[["RMM1", "RMM2", "phase", "amplitude"]]
+
+
 def parse_daily_ao_nao_pna(path) -> pd.Series:
     df = pd.read_csv(path, sep=r"\s+", header=None,
                      names=["Year", "Month", "Day", "Value"],
@@ -114,10 +152,22 @@ def load_all_indices(indices_dir) -> dict:
                 out[key] = parser(p)
             except Exception as e:
                 print(f"Failed to parse {fname}: {e}")
-    mjo_path = indices_dir / "mjo_rmm.txt"
-    if mjo_path.exists():
+    # MJO: prefer ROMI (NOAA PSL, real-time OLR-based, Kiladis et al. 2014)
+    # over the BoM RMM file (Wheeler & Hendon 2004) because the canonical
+    # BoM real-time URL stalled updating in Feb 2024. Both parsers return
+    # the same column schema so the rest of the app is agnostic.
+    romi_path = indices_dir / "romi.txt"
+    rmm_path = indices_dir / "mjo_rmm.txt"
+    if romi_path.exists():
         try:
-            out["mjo"] = parse_mjo_rmm(mjo_path)
+            out["mjo"] = parse_romi(romi_path)
+            out["mjo_source"] = "ROMI (Kiladis et al. 2014; NOAA PSL)"
+        except Exception as e:
+            print(f"Failed to parse romi.txt: {e}")
+    elif rmm_path.exists():
+        try:
+            out["mjo"] = parse_mjo_rmm(rmm_path)
+            out["mjo_source"] = "RMM (Wheeler & Hendon 2004; BoM)"
         except Exception as e:
             print(f"Failed to parse mjo_rmm.txt: {e}")
     return out

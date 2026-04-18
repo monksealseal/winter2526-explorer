@@ -99,9 +99,16 @@ PROVENANCE = [
     {"variable": "ONI (ENSO)", "source": "NOAA CPC Oceanic Niño Index (3-month SST anomaly, Niño 3.4)",
      "period": "3-month running mean", "climatology": "1991-2020 centered 30-year",
      "resolution": "—", "doi_ref": "Huang et al. 2017, J. Climate 30, 8179-8205 (ERSSTv5)"},
-    {"variable": "MJO RMM", "source": "Wheeler & Hendon (2004) RMM1/RMM2 (BoM / NOAA PSL mirror)",
-     "period": "daily, 1974-present", "climatology": "—",
-     "resolution": "—", "doi_ref": "Wheeler & Hendon 2004, Mon. Wea. Rev. 132, 1917-1932"},
+    {"variable": "MJO ROMI (primary)",
+     "source": "NOAA PSL Real-time OLR-based MJO Index (romi.cpcolr.1x.txt)",
+     "period": "daily, 1991-present", "climatology": "CPC OLR-derived",
+     "resolution": "—",
+     "doi_ref": "Kiladis et al. 2014, Mon. Wea. Rev. 142, 1697-1715"},
+    {"variable": "MJO RMM (archived fallback)",
+     "source": "BoM rmm.74toRealtime.txt (upstream feed stalled Feb 2024)",
+     "period": "daily, 1974-02-2024",
+     "climatology": "—", "resolution": "—",
+     "doi_ref": "Wheeler & Hendon 2004, Mon. Wea. Rev. 132, 1917-1932"},
 ]
 
 REFERENCES = [
@@ -113,6 +120,7 @@ REFERENCES = [
     ("Hersbach et al. (2020)", "The ERA5 global reanalysis", "QJRMS 146, 1999-2049"),
     ("Xie et al. (2007)", "A gauge-based analysis of daily precipitation over East Asia", "J. Hydromet. 8, 607-626"),
     ("Wheeler & Hendon (2004)", "An all-season real-time multivariate MJO index", "Mon. Wea. Rev. 132, 1917-1932"),
+    ("Kiladis et al. (2014)", "A comparison of OLR and circulation-based indices for tracking the MJO", "Mon. Wea. Rev. 142, 1697-1715"),
     ("Thompson & Wallace (1998)", "The Arctic Oscillation signature in the wintertime geopotential height and temperature fields", "GRL 25, 1297-1300"),
     ("Hurrell (1995)", "Decadal trends in the North Atlantic Oscillation", "Science 269, 676-679"),
     ("Wallace & Gutzler (1981)", "Teleconnections in the geopotential height field during the NH winter", "Mon. Wea. Rev. 109, 784-812"),
@@ -256,26 +264,41 @@ with tab_rc:
     # ---- MJO data status banner ----
     if not MJO_LOADED:
         st.warning(
-            "**MJO RMM data not loaded.** Questions Q2, Q3, Q4 depend on the "
-            "Wheeler & Hendon (2004) RMM1/RMM2 daily phase index. This sandbox "
-            "can't fetch from bom.gov.au or psl.noaa.gov (firewalled). Run the "
-            "fetch locally and commit the file:\n\n"
-            "```bash\n"
-            "python -c \"from indices import fetch_mjo; from pathlib import Path; "
-            "print(fetch_mjo(Path('data/indices/mjo_rmm.txt')))\"\n"
-            "git add data/indices/mjo_rmm.txt\n"
-            "git commit -m 'Add MJO RMM' && git push\n"
+            "**MJO data not loaded.** Questions Q2, Q3, Q4 depend on a daily "
+            "RMM1/RMM2 (or ROMI) phase index. Preferred source is the NOAA PSL "
+            "ROMI file (Kiladis et al. 2014, real-time OLR-based), since the BoM "
+            "Wheeler-Hendon RMM feed stalled updating in Feb 2024.\n\n"
+            "Run the fetch locally and commit the file:\n\n"
+            "```powershell\n"
+            "python -c \"import urllib.request; from pathlib import Path; "
+            "req=urllib.request.Request('https://psl.noaa.gov/mjo/mjoindex/romi.cpcolr.1x.txt', "
+            "headers={'User-Agent':'Mozilla/5.0'}); "
+            "Path('data/indices/romi.txt').write_bytes(urllib.request.urlopen(req,timeout=30).read())\"\n"
+            "git add data/indices/romi.txt\n"
+            "git commit -m 'Add ROMI MJO index' && git push\n"
             "```"
         )
     else:
         _mjo = indices["mjo"]
+        _src = indices.get("mjo_source", "MJO index")
         _winter_days = int(((_mjo.index >= cube.time.min().values) &
                             (_mjo.index <= cube.time.max().values)).sum())
-        st.success(
-            f"✓ MJO RMM loaded — {len(_mjo):,} total days, "
-            f"{_winter_days} days covering this winter window "
-            f"({str(cube.time.min().values)[:10]} → {str(cube.time.max().values)[:10]})."
-        )
+        _last = _mjo.index.max().date()
+        _stale = (pd.Timestamp.utcnow().tz_convert(None) - _mjo.index.max()).days > 30
+        if _stale:
+            st.warning(
+                f"⚠ MJO loaded but **stale** — source: {_src}. Last date: "
+                f"{_last} ({(pd.Timestamp.utcnow().tz_convert(None) - _mjo.index.max()).days} days "
+                f"behind today). {_winter_days} days cover the winter window "
+                f"({str(cube.time.min().values)[:10]} → {str(cube.time.max().values)[:10]}). "
+                f"Consider switching to a current source (see Methods & Data)."
+            )
+        else:
+            st.success(
+                f"✓ MJO loaded — source: {_src}. {len(_mjo):,} total days, "
+                f"last date {_last}, {_winter_days} days cover the winter window "
+                f"({str(cube.time.min().values)[:10]} → {str(cube.time.max().values)[:10]})."
+            )
 
     # Shared daily series used across the panels
     _cube_time = cube.time.values
@@ -494,7 +517,9 @@ with tab_rc:
             f"with amplitude ≥ 1, at the stated lag (positive lag = MJO leads). "
             f"n shown in-cell. With only {cube.sizes['time']} winter days, any phase × "
             f"lag bin with n < 5-8 should be read cautiously. "
-            f"Reference: Wheeler & Hendon (2004), Mon. Wea. Rev. 132, 1917-1932."
+            f"Source: {indices.get('mjo_source', 'MJO index')}. "
+            f"Phase convention: Wheeler & Hendon (2004) octants; ROMI phases "
+            f"derived from atan2(ROMI2, ROMI1) (Kiladis et al. 2014)."
         )
 
     # ===== Q3: Did MJO phases 7-8 enhance cold-air outbreaks? =====
