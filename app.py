@@ -174,9 +174,16 @@ def align_index_to_cube(series, cube_time):
         return series.reindex(rng, method="ffill").reindex(idx_daily)
     return series.reindex(idx_daily)
 
-def correlation_map(field, index_vals):
-    mask_t = ~np.isnan(index_vals)
-    f = field[mask_t]; x = index_vals[mask_t]
+def correlation_map(field: np.ndarray, idx_vals: np.ndarray) -> tuple[np.ndarray, int]:
+    """Grid-point Pearson correlation between ``field(t, lat, lon)`` and
+    ``idx_vals(t)``. NaN-safe per cell.
+
+    Returns ``(r_map, n_used)`` where n_used is the number of days with a
+    finite index value (so the same n applies to every cell up to the
+    cell's own NaN days).
+    """
+    mask_t = ~np.isnan(idx_vals)
+    f = field[mask_t]; x = idx_vals[mask_t]
     T, H, W = f.shape
     f_flat = f.reshape(T, H * W)
     r_flat = np.full(H * W, np.nan)
@@ -188,33 +195,6 @@ def correlation_map(field, index_vals):
         if np.std(fv) < 1e-10 or np.std(xv) < 1e-10: continue
         r_flat[j] = np.corrcoef(fv, xv)[0, 1]
     return r_flat.reshape(H, W), int(mask_t.sum())
-
-def composite_stats(field, mask_pos, mask_neg):
-    n_pos = int(mask_pos.sum()); n_neg = int(mask_neg.sum())
-    shape_2d = field.shape[1:]
-    mean_pos = np.nanmean(field[mask_pos], axis=0) if n_pos > 0 else np.full(shape_2d, np.nan)
-    mean_neg = np.nanmean(field[mask_neg], axis=0) if n_neg > 0 else np.full(shape_2d, np.nan)
-    diff = mean_pos - mean_neg
-    if n_pos > 1 and n_neg > 1:
-        var_pos = np.nanvar(field[mask_pos], axis=0, ddof=1)
-        var_neg = np.nanvar(field[mask_neg], axis=0, ddof=1)
-        se = np.sqrt(var_pos / n_pos + var_neg / n_neg)
-        t_stat = np.where(se > 0, diff / se, np.nan)
-    else:
-        t_stat = np.full(shape_2d, np.nan)
-    return dict(mean_pos=mean_pos, mean_neg=mean_neg, diff=diff,
-                n_pos=n_pos, n_neg=n_neg, t_stat=t_stat)
-
-def add_sig_stipples(fig, mask_2d, lats, lons, every=3):
-    if not mask_2d.any(): return
-    lat_g, lon_g = np.meshgrid(lats, lons, indexing="ij")
-    stipple = mask_2d & ((np.arange(mask_2d.shape[0])[:, None] % every == 0) &
-                         (np.arange(mask_2d.shape[1])[None, :] % every == 0))
-    if stipple.any():
-        fig.add_trace(go.Scatter(
-            x=lon_g[stipple], y=lat_g[stipple], mode="markers",
-            marker=dict(size=3, color="black", symbol="circle-open"),
-            showlegend=False, hoverinfo="skip"))
 
 def get_series(indices, key):
     if key == "mjo_amp":
@@ -247,7 +227,15 @@ st.caption(
     f"{len(available_indices)}/{len(INDEX_META)} indices loaded"
 )
 
-tab1, tab2, tab3, tab4 = st.tabs(["This Winter", "Indices", "Composites & Correlations", "Dataset Inspector"])
+MJO_LOADED = "mjo" in indices
+
+tab_rc, tab1, tab2, tab3, tab4 = st.tabs([
+    "🧭 Research compass",
+    "This Winter",
+    "Indices",
+    "Composites & Correlations",
+    "Methods & Data",
+])
 
 with tab1:
     months = {"Dec 2025": "2025-12", "Jan 2026": "2026-01", "Feb 2026": "2026-02", "Mar 2026": "2026-03"}
@@ -560,136 +548,296 @@ with tab3:
             mask_neg = valid & (idx_vals < 0)
             th_label = "sign"
 
-        comp = composite_stats(field, mask_pos, mask_neg)
+        comp = welch_t_composite(field, mask_pos, mask_neg, alpha=BOOTSTRAP_ALPHA)
         r_map, n_corr = correlation_map(field, idx_vals)
         n_eff = effective_n(idx_vals[valid])
-        r_crit = (stats.t.ppf(0.975, df=n_eff - 2) /
-                  np.sqrt(stats.t.ppf(0.975, df=n_eff - 2)**2 + n_eff - 2)) if n_eff > 2 else 1.0
+        r_sig_mask = corr_map_t_significance(r_map, n_eff, alpha=BOOTSTRAP_ALPHA)
+        # critical |r| for the caption (two-sided t at n_eff-2 df)
+        if n_eff > 2:
+            _tc = stats.t.ppf(1 - BOOTSTRAP_ALPHA/2, df=n_eff - 2)
+            r_crit = float(_tc / np.sqrt(_tc**2 + n_eff - 2))
+        else:
+            r_crit = 1.0
 
         lats, lons = cube.latitude.values, cube.longitude.values
         meta = VAR_META[field_pick]
+        idx_label = INDEX_META[idx_pick]["label"]
+        field_label = meta["label"]
+        climo_base = (T2M_CLIMO_BASE if field_pick == "t2m_anom" else
+                      Z500_CLIMO_BASE if field_pick == "z500_anom" else
+                      "— (raw field, not anomalized)" if field_pick in ("t2m", "z500", "precip") else "—")
 
+        import matplotlib.pyplot as _plt
         with c_maps:
             a, b = st.columns(2)
             with a:
-                st.markdown(f"**Composite difference** — (positive {INDEX_META[idx_pick]['label']} days) − (negative {INDEX_META[idx_pick]['label']} days)")
-                st.caption(
-                    f"threshold: {th_label} · n(+) = {comp['n_pos']} · n(−) = {comp['n_neg']} · lag = {lag:+d}d · "
-                    "red = field higher on positive-index days; blue = field higher on negative-index days."
+                composite_caption = (
+                    f"Fig. Composite difference of {field_label} between days with "
+                    f"{idx_label} > 0 and < 0 (threshold: {th_label}; lag {lag:+d}d). "
+                    f"n(+) = {comp['n_pos']}, n(−) = {comp['n_neg']}. "
+                    f"Stippling: two-sided Welch's t-test, α = {BOOTSTRAP_ALPHA} (von Storch & Zwiers 1999 §6). "
+                    "Diverging colormap centered on zero."
                 )
                 if comp["n_pos"] < 5 or comp["n_neg"] < 5:
-                    st.warning(f"Sample size too small (n+={comp['n_pos']}, n-={comp['n_neg']}).")
-                dmax = float(np.nanmax(np.abs(comp["diff"]))) if np.isfinite(comp["diff"]).any() else 1.0
-                fig_d = go.Figure(go.Heatmap(
-                    z=comp["diff"], x=lons, y=lats,
-                    colorscale="RdBu_r", zmin=-dmax, zmax=dmax,
-                    colorbar=dict(title=f"Δ {meta['label']}"),
-                    hovertemplate="lat %{y:.2f}<br>lon %{x:.2f}<br>Δ %{z:.2f}<extra></extra>"))
-                if show_sig and comp["n_pos"] > 2 and comp["n_neg"] > 2:
-                    df_w = min(comp["n_pos"], comp["n_neg"]) - 1
-                    t_c = stats.t.ppf(0.975, df=df_w)
-                    add_sig_stipples(fig_d, np.abs(comp["t_stat"]) > t_c, lats, lons)
-                fig_d.update_layout(yaxis=dict(scaleanchor="x", scaleratio=1.2),
-                                    height=450, margin=dict(l=40, r=40, t=10, b=40))
-                st.plotly_chart(fig_d, use_container_width=True)
+                    st.warning(f"Sample size is small (n+={comp['n_pos']}, n−={comp['n_neg']}). "
+                               "Interpret with caution.")
+                fig_d = make_map(
+                    lats, lons, comp["diff"],
+                    cmap="RdBu_r", center_on_zero=True,
+                    title=f"Composite Δ {field_label}",
+                    subtitle=f"{idx_label} (+) − (−) · lag {lag:+d}d · threshold {th_label}",
+                    caption=composite_caption,
+                    units=f"Δ {field_label}",
+                    stipple_mask=comp["sig"] if show_sig else None,
+                    highlight_boxes=[{**SE_US_BOX, "label": "SE-US"}],
+                )
+                st.pyplot(fig_d, use_container_width=True)
+                _plt.close(fig_d)
 
             with b:
-                st.markdown(f"**Correlation map** (daily r, {INDEX_META[idx_pick]['label']} vs {meta['label']})")
-                st.caption(f"n = {n_corr}d · n_eff = {n_eff} · |r| for p<0.05 ≈ {r_crit:.3f}")
-                fig_r = go.Figure(go.Heatmap(
-                    z=r_map, x=lons, y=lats,
-                    colorscale="RdBu_r", zmin=-1, zmax=1,
-                    colorbar=dict(title="r"),
-                    hovertemplate="lat %{y:.2f}<br>lon %{x:.2f}<br>r %{z:.3f}<extra></extra>"))
-                if show_sig:
-                    add_sig_stipples(fig_r, np.abs(r_map) > r_crit, lats, lons)
-                fig_r.update_layout(yaxis=dict(scaleanchor="x", scaleratio=1.2),
-                                    height=450, margin=dict(l=40, r=40, t=10, b=40))
-                st.plotly_chart(fig_r, use_container_width=True)
+                corr_caption = (
+                    f"Fig. Per-grid-cell Pearson r between daily {idx_label} and {field_label} "
+                    f"(lag {lag:+d}d). n = {n_corr} days; effective sample size n_eff = {n_eff} after "
+                    f"AR(1) adjustment (Bretherton et al. 1999). "
+                    f"Stippling: two-sided t-test on r with df = n_eff − 2, α = {BOOTSTRAP_ALPHA} "
+                    f"(|r| > {r_crit:.3f})."
+                )
+                fig_r = make_map(
+                    lats, lons, r_map,
+                    cmap="RdBu_r", vmin=-1, vmax=1,
+                    title=f"Correlation r · {idx_label} vs {field_label}",
+                    subtitle=f"lag {lag:+d}d · n={n_corr}, n_eff={n_eff} · |r| for α=0.05 ≈ {r_crit:.3f}",
+                    caption=corr_caption,
+                    units="r",
+                    stipple_mask=r_sig_mask if show_sig else None,
+                    highlight_boxes=[{**SE_US_BOX, "label": "SE-US"}],
+                )
+                st.pyplot(fig_r, use_container_width=True)
+                _plt.close(fig_r)
 
+        # ---- SE-US box summary with bootstrap CI ----
         se_r_da = xr.DataArray(r_map, dims=("latitude", "longitude"),
                                coords=dict(latitude=lats, longitude=lons))
-        st.metric("SE-US mean correlation", f"{float(box_mean(se_r_da, SE_US_BOX)):+.3f}")
+        se_mean_r = float(box_mean(se_r_da, SE_US_BOX))
 
-        with st.expander("Absolute-phase composites (matches Juliette's notebook style)"):
+        se_field_box = box_mean(cube[field_pick], SE_US_BOX).to_series()
+        idx_series = pd.Series(idx_aligned.values,
+                               index=pd.DatetimeIndex([pd.Timestamp(t).normalize() for t in cube_time]))
+        paired = pd.concat([idx_series, se_field_box], axis=1,
+                           keys=["idx", "field"]).dropna()
+        if len(paired) >= 10:
+            bs = cached_bootstrap_corr(tuple(paired["idx"].values),
+                                       tuple(paired["field"].values),
+                                       n_boot=BOOTSTRAP_N)
+            se_r_str = fmt_ci(bs)
+            se_n_str = f"n = {bs['n']}, block length = {bs['block_len']}d"
+        else:
+            se_r_str = "insufficient overlap"
+            se_n_str = f"n = {len(paired)}"
+
+        mm1, mm2 = st.columns(2)
+        mm1.metric("SE-US mean r (map average)", f"{se_mean_r:+.3f}",
+                   help="Cosine-weighted mean of the correlation map over the SE-US box.")
+        mm2.metric("SE-US box r (time-series bootstrap)", se_r_str,
+                   help=f"Pearson r between {idx_label} and SE-US box-mean {field_label}. "
+                        f"95% CI from moving-block bootstrap, B = {BOOTSTRAP_N}. {se_n_str}.")
+
+        with st.expander("Absolute-phase composites"):
             st.caption(
-                f"Mean {VAR_META[field_pick]['label']} on days when "
-                f"{INDEX_META[idx_pick]['label']} is in its **positive** vs **negative** phase. "
-                "Use the negative-phase panel to read the pattern directly (e.g. for AO<0 "
-                "cold-air outbreaks), without having to invert the difference map."
+                f"Mean {field_label} on days in the positive vs negative phase of {idx_label}. "
+                "Use the negative-phase panel to read the pattern directly "
+                "(e.g. for AO<0 cold-air outbreaks) without mentally inverting the difference map. "
+                f"Climatology baseline: {climo_base}."
             )
-            pos_lbl = f"positive {INDEX_META[idx_pick]['label']} ({comp['n_pos']} days)"
-            neg_lbl = f"negative {INDEX_META[idx_pick]['label']} ({comp['n_neg']} days)"
             aa, bb = st.columns(2)
             abs_meta = VAR_META[field_pick]
-            for panel, data, lbl in [(aa, comp["mean_pos"], pos_lbl),
-                                      (bb, comp["mean_neg"], neg_lbl)]:
+            is_anom_abs = field_pick.endswith("_anom")
+            for panel, data, lbl, n in [
+                (aa, comp["mean_pos"], f"positive {idx_label}", comp["n_pos"]),
+                (bb, comp["mean_neg"], f"negative {idx_label}", comp["n_neg"]),
+            ]:
                 with panel:
                     if np.isfinite(data).any():
-                        vv = max(float(np.nanmax(np.abs(data))), 1e-6)
-                        fig_a = go.Figure(go.Heatmap(
-                            z=data, x=lons, y=lats,
-                            colorscale=abs_meta["cmap"],
-                            zmin=abs_meta["vmin"] if abs_meta["vmin"] is not None else -vv,
-                            zmax=abs_meta["vmax"] if abs_meta["vmax"] is not None else vv,
-                            colorbar=dict(title=abs_meta["label"]),
-                            hovertemplate="lat %{y:.2f}<br>lon %{x:.2f}<br>%{z:.2f}<extra></extra>"))
-                        fig_a.update_layout(title=f"Mean on {lbl}",
-                            yaxis=dict(scaleanchor="x", scaleratio=1.2),
-                            height=400, margin=dict(l=40, r=40, t=50, b=40))
-                        st.plotly_chart(fig_a, use_container_width=True)
+                        fig_a = make_map(
+                            lats, lons, data,
+                            cmap=abs_meta["cmap"],
+                            vmin=abs_meta["vmin"], vmax=abs_meta["vmax"],
+                            center_on_zero=is_anom_abs,
+                            title=f"Mean on {lbl} ({n} days)",
+                            subtitle=f"lag {lag:+d}d · threshold {th_label}",
+                            caption=f"Simple time-mean of {field_label}. No significance test.",
+                            units=field_label,
+                            highlight_boxes=[{**SE_US_BOX, "label": "SE-US"}],
+                            contour_levels=np.arange(-300, 301, 60) if field_pick == "z500_anom" else None,
+                        )
+                        st.pyplot(fig_a, use_container_width=True)
+                        _plt.close(fig_a)
+
+        with st.expander("About this analysis"):
+            st.markdown(f"""
+**Composite difference map.** For each day, the index value at time
+``t − lag`` is compared to zero (or ±{threshold if th_mode.startswith('±') else 0:.2f}σ).
+Days in the positive and negative groups are averaged separately for every grid cell,
+and the difference (positive − negative) is tested with a two-sided **Welch's t-test**
+(Welch 1947; von Storch & Zwiers 1999 §6). Stippling marks cells where the
+difference is significant at α = {BOOTSTRAP_ALPHA}. Welch's test does not require
+equal variances between the two composite groups.
+
+**Correlation map.** Cell-wise Pearson correlation between the daily index and the
+daily field. Significance is a two-sided t-test on r with df = ``n_eff − 2``, where
+``n_eff = n (1 − r1) / (1 + r1)`` uses the lag-1 autocorrelation of the index to
+adjust for serial dependence (Bretherton et al. 1999). The critical |r| for this
+n_eff is stated in the figure subtitle.
+
+**SE-US box time-series correlation** uses a **moving-block bootstrap** (Künsch 1989;
+Wilks 2011 §5.3.5), B = {BOOTSTRAP_N}, block length ≈ n / n_eff. 95% CI is the
+2.5/97.5 percentiles of the resampling distribution. This is more honest than a
+parametric p-value on autocorrelated daily data.
+
+**Limitations.** With only 151 winter days, n_eff is typically 15-25 for daily
+teleconnection indices — significance tests are weak and should be read alongside
+the CI on the SE-US summary. Composite differences at tails of the distribution
+(±2σ) are doubly weak because group sizes shrink.
+""")
 
 with tab4:
-    qp_set(tab="dataset")
+    qp_set(tab="methods")
+    st.header("Methods & Data")
+    st.caption(
+        "Everything shown in the other tabs is computed with the methods "
+        "documented here. Figures produced by this app can be cited with the "
+        "provenance and references listed below."
+    )
+
+    # ---- 1. Methods ----
+    st.markdown("## 1. Methods")
+    st.markdown("""
+**Anomalies.** For every variable, the daily anomaly is the daily value
+minus the same-calendar-day mean of the climatology base period
+(variable-specific, listed in §3).
+
+**Correlation at a point / box.** Pearson correlation ``r`` between a daily
+teleconnection index and the area-weighted (cos φ) mean of the field over
+the named box. 95% confidence interval from the **moving-block bootstrap**
+(Künsch 1989; Wilks 2011 §5.3.5): B = 1000 resamples of contiguous blocks
+of length ``n / n_eff``, where ``n_eff = n (1 − r1) / (1 + r1)`` with ``r1``
+the lag-1 autocorrelation of the index (Bretherton et al. 1999).
+
+**Correlation map.** Per grid cell, Pearson r between the daily index and
+the daily field; cells with fewer than 10 finite pairs are masked. Stippling
+marks cells where a two-sided t-test on r exceeds α = 0.05 using df =
+``n_eff − 2``. This is a pointwise test; we do not apply a global
+field-significance correction (Wilks 2016, *BAMS* 97, 2263-2273) and the
+effective density of significant cells will be overstated under the null.
+
+**Composite difference.** Days are split by the sign (or ±σ magnitude) of
+the lagged index. The positive and negative groups are averaged separately
+at each grid cell and differenced. Per-cell significance from a two-sided
+**Welch's unequal-variance t-test** (Welch 1947; von Storch & Zwiers 1999
+§6) with the Welch-Satterthwaite degrees of freedom.
+
+**Absolute-phase composites.** Simple time-mean of the field over each
+phase group; no significance test shown.
+
+**Multiple regression.** Ordinary least squares ``y = Xβ + ε`` where ``y``
+is the daily Florida-box T2m anomaly and ``X`` is (intercept, AO, NAO, PNA,
+ONI) on the same day. Reported: β, OLS SE, t statistic, two-sided p-value
+(anti-conservative under residual autocorrelation — flagged in the panel).
+
+**Event detection.** Contiguous runs of days for which the Florida-box
+T2m anomaly drops below a user-set threshold, with a minimum-duration
+filter. Event peak = date of minimum anomaly within the run.
+
+**Projection.** All maps render with cartopy in PlateCarree (Equidistant
+Cylindrical) on the native ERA5 0.25° grid. Coastline, country, and
+state polygons from Natural Earth (1:50 m).
+""")
+
+    # ---- 2. Data provenance ----
+    st.markdown("## 2. Data provenance")
+    st.dataframe(pd.DataFrame(PROVENANCE), hide_index=True, use_container_width=True)
+
+    # ---- 3. Cube extent and current state ----
+    st.markdown("## 3. Current cube state")
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("### Extent")
-        st.markdown(f"- **Time**: `{str(cube.time.min().values)[:10]}` → `{str(cube.time.max().values)[:10]}`")
-        st.markdown(f"- **Days**: {cube.sizes['time']}")
-        st.markdown(f"- **Lat**: {float(cube.latitude.min()):.2f}° to {float(cube.latitude.max()):.2f}° ({cube.sizes['latitude']} pts)")
-        st.markdown(f"- **Lon**: {float(cube.longitude.min()):.2f}° to {float(cube.longitude.max()):.2f}° ({cube.sizes['longitude']} pts)")
-        st.markdown(f"- **Grid**: ~0.25° (ERA5 native)")
+        st.markdown("**Extent**")
+        st.markdown(f"- Time: `{str(cube.time.min().values)[:10]}` → `{str(cube.time.max().values)[:10]}` ({cube.sizes['time']} days)")
+        st.markdown(f"- Lat: {float(cube.latitude.min()):.2f}° to {float(cube.latitude.max()):.2f}° ({cube.sizes['latitude']} pts)")
+        st.markdown(f"- Lon: {float(cube.longitude.min()):.2f}° to {float(cube.longitude.max()):.2f}° ({cube.sizes['longitude']} pts)")
+        st.markdown("- Grid: ~0.25° (ERA5 native)")
     with c2:
-        st.markdown("### Variables")
+        st.markdown("**Variables (missingness)**")
         for var in cube.data_vars:
             n_nan = int(cube[var].isnull().sum()); total = cube[var].size
             st.markdown(f"- `{var}` — {VAR_META.get(var, {}).get('label', var)}  *({100 * n_nan / total:.1f}% NaN)*")
 
-    st.markdown("---")
-    st.markdown("## 🚨 Scientific caveats — read before citing")
-    st.markdown("""
-- **T2m climatology = 2016-2024** (9 years). Source ERA5 T2m file starts in 2016, so we can't use WMO-standard 1991-2020. Anomalies may be cool-biased (2016-2024 warmer than 1991-2020).
-- **Z500 climatology = 1994-2020** (27 years). Close to WMO-standard.
-- **Precipitation coverage: Jan 1 – Mar 31 2026 only.** December 2025 precip missing. Source: CPC Global PRCP V1.0 regridded to ERA5 0.25°.
-- **Z500 coverage ends Feb 28 2026.** March 2026 Z500 views show NaN.
-- **Daily means** from 0Z + 12Z snapshots only, slight midday bias (~+0.5°C over land).
-- **DJF** in this app = Dec+Jan+Feb. Some slides use Dec 1 – Mar 1.
-- **Composite threshold default `> 0` / `< 0`** to match Juliette's notebook. ±σ option available.
-- **Sample size small:** DJF ~90 days, effective N ~15-20 with lag-1 autocorrelation.
-- **Does not replace expert judgment.** Confirm findings with Prof. Nolan before presenting.
+    # ---- 4. Indices loaded ----
+    st.markdown("## 4. Indices loaded")
+    idx_rows = []
+    for k in INDEX_META:
+        base = "mjo" if k == "mjo_amp" else k
+        if base in indices:
+            s = indices[base]
+            idx_rows.append({"Index": INDEX_META[k]["label"],
+                             "Range": f"{s.index.min().date()} → {s.index.max().date()}",
+                             "N": len(s), "Cadence": INDEX_META[k]["cadence"]})
+        else:
+            idx_rows.append({"Index": INDEX_META[k]["label"], "Range": "NOT LOADED",
+                             "N": 0, "Cadence": INDEX_META[k]["cadence"]})
+    st.dataframe(pd.DataFrame(idx_rows), hide_index=True, use_container_width=True)
+
+    if "mjo" not in indices:
+        st.info(
+            "**How to enable MJO RMM data.** "
+            "This sandbox blocks outbound HTTP to BoM/NOAA; do the fetch on a "
+            "machine with internet access and commit the result:\n\n"
+            "```bash\n"
+            "python -c \"from indices import fetch_mjo; from pathlib import Path; "
+            "print(fetch_mjo(Path('data/indices/mjo_rmm.txt')))\"\n"
+            "git add data/indices/mjo_rmm.txt\n"
+            "git commit -m 'Add MJO RMM data for Tori analyses'\n"
+            "git push\n"
+            "```\n"
+            "After the next Streamlit Cloud redeploy, Q2–Q4 in the Research "
+            "Compass tab will activate."
+        )
+
+    # ---- 5. Known limitations ----
+    st.markdown("## 5. Known limitations")
+    st.markdown(f"""
+- **T2m climatology = {T2M_CLIMO_BASE}** — 9 years, shorter than the WMO-standard
+  30-year normal. Anomalies may be warm-biased vs. 1991-2020 because recent years
+  are warmer than the mid-climate baseline.
+- **Z500 climatology = {Z500_CLIMO_BASE}** — close to WMO-standard (27 years).
+- **Precipitation coverage: 2026-01-01 onward.** December 2025 precip is absent;
+  December maps render NaN. Data source: {PRECIP_SOURCE}.
+- **Z500 coverage ends 2026-02-28.** March 2026 Z500 panels render NaN.
+- **Daily means** from 00/12 UTC snapshots only — no overnight minima; slight
+  (<0.5 °C) warm bias over land during the 12 UTC pass.
+- **n is small.** Only 151 winter days total; with lag-1 autocorrelation the
+  effective sample size is typically 15-30 for daily teleconnection indices.
+  Parametric p-values below ~0.05 should be treated as indicative, not decisive.
+- **No field-significance correction.** Stippling on the maps flags pointwise
+  significance; neighbouring grid cells are correlated and the *expected*
+  number of "significant" cells under the null is >5%. Use Wilks (2016) FDR
+  control if results are cited.
+- **Does not replace expert judgment.** Confirm findings with Prof. Becker /
+  Prof. Nolan before presenting or citing.
 """)
 
-    st.markdown("---")
-    st.markdown("## Reference r-values from the deck")
+    # ---- 6. Reference r-values from the group's deck ----
+    st.markdown("## 6. Reference r-values from the group's deck")
     st.dataframe(pd.DataFrame([
         {"Index": k.split("_")[0].upper(), "Reference r": f"{v['r']:+.3f}",
          "Source": v["source"], "Method": v["method"]}
         for k, v in REFERENCE_R.items()
     ]), hide_index=True, use_container_width=True)
 
-    st.markdown("---")
-    st.markdown("## Indices loaded")
-    rows = []
-    for k in INDEX_META:
-        base = "mjo" if k == "mjo_amp" else k
-        if base in indices:
-            s = indices[base]
-            rows.append({"Index": INDEX_META[k]["label"],
-                        "Range": f"{s.index.min().date()} → {s.index.max().date()}",
-                        "N": len(s)})
-        else:
-            rows.append({"Index": INDEX_META[k]["label"], "Range": "NOT LOADED", "N": 0})
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    # ---- 7. References ----
+    st.markdown("## 7. References")
+    for author, title, journal in REFERENCES:
+        st.markdown(f"- **{author}** — {title}. *{journal}*.")
 
-    with st.expander("Raw cube repr (xarray)"):
+    with st.expander("Raw xarray cube repr"):
         st.code(repr(cube), language="python")

@@ -164,7 +164,9 @@ def welch_t_composite(field, mask_pos, mask_neg, *, alpha: float = 0.05) -> dict
     t_crit = _stats.t.ppf(1.0 - alpha / 2.0, df=np.nan_to_num(df, nan=1.0))
     sig = np.where(np.isfinite(t_stat) & np.isfinite(df),
                    np.abs(t_stat) > t_crit, False)
-    return dict(diff=diff, t=t_stat, sig=sig, n_pos=n_pos, n_neg=n_neg)
+    return dict(diff=diff, t=t_stat, sig=sig,
+                mean_pos=mean_p, mean_neg=mean_n,
+                n_pos=n_pos, n_neg=n_neg)
 
 
 def corr_map_t_significance(r_map, n_eff: int, alpha: float = 0.05) -> np.ndarray:
