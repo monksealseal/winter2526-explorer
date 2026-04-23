@@ -21,15 +21,29 @@ from scipy import stats as _stats
 
 
 def effective_n(arr) -> int:
-    """Effective sample size under lag-1 AR(1) autocorrelation.
+    """Effective sample size under lag-1 AR(1) autocorrelation (single-series).
 
-    ``n_eff = n * (1 - r1) / (1 + r1)`` where ``r1`` is the lag-1
-    autocorrelation of the series. Applied to a correlation or mean
-    before converting to a p-value so that daily autocorrelated data
-    don't inflate statistical significance.
+    Computes ``n_eff = n * (1 - r1) / (1 + r1)`` where ``r1`` is the lag-1
+    autocorrelation of the input series. Conservative estimator for use
+    in significance tests on daily autocorrelated data.
+
+    Note
+    ----
+    This is the classical single-series AR(1) effective sample size
+    (Thiebaux & Zwiers 1984). Bretherton et al. (1999) generalize to the
+    case of correlating two autocorrelated series, where the appropriate
+    adjustment uses the product ``r1_x * r1_y`` and gives a somewhat
+    larger n_eff. Our single-series form is therefore *more conservative*
+    (smaller n_eff, smaller reported significance) than the Bretherton
+    two-series form. We use it because (a) the field's lag-1 is not
+    always available in the call site, and (b) conservatism is a feature
+    for short-record analyses.
 
     References
     ----------
+    Thiebaux, H. J. & Zwiers, F. W. (1984), "The interpretation and
+    estimation of effective sample size", *J. Climate Appl. Meteor.*
+    23, 800-811.
     Bretherton, C. S., Widmann, M., Dymnikov, V. P., Wallace, J. M.,
     Bladé, I. (1999), "The effective number of spatial degrees of
     freedom of a time-varying field", *J. Climate* 12, 1990-2009.
@@ -148,22 +162,32 @@ def welch_t_composite(field, mask_pos, mask_neg, *, alpha: float = 0.05) -> dict
     if n_pos < 2 or n_neg < 2:
         nan_a = np.full(spatial, np.nan)
         return dict(diff=nan_a, t=nan_a, sig=np.zeros(spatial, dtype=bool),
-                    n_pos=n_pos, n_neg=n_neg)
+                    n_pos=n_pos, n_neg=n_neg,
+                    mean_pos=nan_a, mean_neg=nan_a)
+    # Per-cell finite counts so NaN days (e.g. March 2026 Z500, Dec 2025
+    # precip) don't bias the SE / df downward.
+    finite_p = np.isfinite(field[mask_pos])
+    finite_n = np.isfinite(field[mask_neg])
+    n_p_cell = finite_p.sum(axis=0).astype(float)  # per-cell count
+    n_n_cell = finite_n.sum(axis=0).astype(float)
     mean_p = np.nanmean(field[mask_pos], axis=0)
     mean_n = np.nanmean(field[mask_neg], axis=0)
     var_p = np.nanvar(field[mask_pos], axis=0, ddof=1)
     var_n = np.nanvar(field[mask_neg], axis=0, ddof=1)
-    se = np.sqrt(var_p / n_pos + var_n / n_neg)
     diff = mean_p - mean_n
     with np.errstate(invalid="ignore", divide="ignore"):
+        se = np.sqrt(np.where(n_p_cell > 0, var_p / n_p_cell, np.nan) +
+                     np.where(n_n_cell > 0, var_n / n_n_cell, np.nan))
         t_stat = np.where(se > 0, diff / se, np.nan)
-        num = (var_p / n_pos + var_n / n_neg) ** 2
-        den = (var_p ** 2) / ((n_pos ** 2) * (n_pos - 1)) + \
-              (var_n ** 2) / ((n_neg ** 2) * (n_neg - 1))
+        num = (var_p / n_p_cell + var_n / n_n_cell) ** 2
+        den = (var_p ** 2) / np.where(n_p_cell > 1, (n_p_cell ** 2) * (n_p_cell - 1), np.nan) + \
+              (var_n ** 2) / np.where(n_n_cell > 1, (n_n_cell ** 2) * (n_n_cell - 1), np.nan)
         df = np.where(den > 0, num / den, np.nan)
-    t_crit = _stats.t.ppf(1.0 - alpha / 2.0, df=np.nan_to_num(df, nan=1.0))
-    sig = np.where(np.isfinite(t_stat) & np.isfinite(df),
-                   np.abs(t_stat) > t_crit, False)
+    # Welch's test requires df ≥ 1 for a finite critical t; mask cells
+    # with fewer than 2 finite days in either composite as non-significant.
+    enough = (n_p_cell >= 2) & (n_n_cell >= 2) & np.isfinite(df)
+    t_crit = _stats.t.ppf(1.0 - alpha / 2.0, df=np.where(enough, df, 1.0))
+    sig = np.where(enough & np.isfinite(t_stat), np.abs(t_stat) > t_crit, False)
     return dict(diff=diff, t=t_stat, sig=sig,
                 mean_pos=mean_p, mean_neg=mean_n,
                 n_pos=n_pos, n_neg=n_neg)
