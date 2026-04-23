@@ -84,11 +84,17 @@ def make_map(
     ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=proj)
 
     if center_on_zero:
-        candidate = float(np.nanmax(np.abs(field))) if np.isfinite(field).any() else 1.0
-        if vmax is not None:
-            candidate = max(candidate, float(abs(vmax)))
-        if vmin is not None:
-            candidate = max(candidate, float(abs(vmin)))
+        # If the caller passes vmin/vmax, honor them strictly (saturate any
+        # data outside the range) so multi-panel figures share an identical
+        # color scale. Only auto-scale to the data when neither bound is
+        # given.
+        if vmin is not None or vmax is not None:
+            candidate = max(abs(vmin) if vmin is not None else 0.0,
+                            abs(vmax) if vmax is not None else 0.0)
+        elif np.isfinite(field).any():
+            candidate = float(np.nanmax(np.abs(field)))
+        else:
+            candidate = 1.0
         vmin, vmax = -candidate, candidate
 
     im = ax.pcolormesh(
