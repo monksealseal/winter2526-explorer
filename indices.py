@@ -142,22 +142,54 @@ def parse_mjo_rmm(path) -> pd.DataFrame:
               .set_index("Date").sort_index())
 
 
-MJO_FALLBACK_URLS = [
-    "http://www.bom.gov.au/climate/mjo/graphics/rmm.74toRealtime.txt",
-    "https://psl.noaa.gov/mjo/mjoindex/data/rmm.74toRealtime.txt",
+# NOAA PSL ROMI (Kiladis et al. 2014) is the current real-time MJO index
+# we use. The BoM Wheeler-Hendon RMM feed is listed as an archival fallback
+# only — its canonical URL stopped updating in Feb 2024 (verified April 2026).
+MJO_FETCH_URLS = [
+    ("romi.txt",
+     "https://psl.noaa.gov/mjo/mjoindex/romi.cpcolr.1x.txt",
+     "ROMI (NOAA PSL, Kiladis et al. 2014)"),
+    ("mjo_rmm.txt",
+     "http://www.bom.gov.au/climate/mjo/graphics/rmm.74toRealtime.txt",
+     "RMM (BoM, Wheeler & Hendon 2004; may be stale)"),
 ]
 
-def fetch_mjo(out_path, timeout=30):
-    for url in MJO_FALLBACK_URLS:
+
+def fetch_mjo(indices_dir, *, timeout: int = 30) -> dict:
+    """Download the best-available MJO daily-phase file into ``indices_dir``.
+
+    Tries sources in order (currently: NOAA PSL ROMI, then BoM RMM) and
+    writes the first successful payload to the appropriate filename
+    (``romi.txt`` or ``mjo_rmm.txt``). Returns a dict describing what
+    happened.
+
+    Parameters
+    ----------
+    indices_dir : path-like
+        Directory to write the file into (typically ``data/indices``).
+        Must exist.
+    timeout : int
+        Seconds per HTTP request.
+
+    Returns
+    -------
+    dict with keys ``filename, url, source, error`` (the first three
+    populated on success, ``error`` populated on failure).
+    """
+    indices_dir = Path(indices_dir)
+    errors = []
+    for fname, url, label in MJO_FETCH_URLS:
         try:
             req = urllib.request.Request(
                 url, headers={"User-Agent": "Mozilla/5.0 (gencirc-app)"})
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                Path(out_path).write_bytes(r.read())
-            return url
+                payload = r.read()
+            out = indices_dir / fname
+            out.write_bytes(payload)
+            return {"filename": str(out), "url": url, "source": label}
         except Exception as e:
-            print(f"  MJO fetch {url} failed: {type(e).__name__}: {e}")
-    return None
+            errors.append(f"{url}: {type(e).__name__}: {e}")
+    return {"error": "; ".join(errors)}
 
 
 def load_all_indices(indices_dir) -> dict:

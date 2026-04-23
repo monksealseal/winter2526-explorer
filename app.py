@@ -2259,14 +2259,14 @@ state polygons from Natural Earth (1:50 m).
 
     if "mjo" not in indices:
         st.info(
-            "**How to enable MJO RMM data.** "
-            "This sandbox blocks outbound HTTP to BoM/NOAA; do the fetch on a "
-            "machine with internet access and commit the result:\n\n"
+            "**How to enable MJO data.** "
+            "Streamlit Cloud does have internet access, but we prefer to "
+            "commit the MJO file into the repo for reproducibility. Run "
+            "the fetch on any machine with Python and commit the result:\n\n"
             "```bash\n"
-            "python -c \"from indices import fetch_mjo; from pathlib import Path; "
-            "print(fetch_mjo(Path('data/indices/mjo_rmm.txt')))\"\n"
-            "git add data/indices/mjo_rmm.txt\n"
-            "git commit -m 'Add MJO RMM data for Tori analyses'\n"
+            "python -c \"from indices import fetch_mjo; print(fetch_mjo('data/indices'))\"\n"
+            "git add data/indices/romi.txt\n"
+            "git commit -m 'Add ROMI MJO index data'\n"
             "git push\n"
             "```\n"
             "After the next Streamlit Cloud redeploy, Q2–Q4 in the Research "

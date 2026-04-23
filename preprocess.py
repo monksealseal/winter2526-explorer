@@ -130,7 +130,11 @@ def main():
     except Exception as e:
         print(f"  ONI fetch failed: {e}")
 
-    fetch_mjo(indices_dir / "mjo_rmm.txt")
+    result = fetch_mjo(indices_dir)
+    if "error" in result:
+        print(f"  MJO fetch failed: {result['error']}")
+    else:
+        print(f"  MJO: {result['source']} -> {result['filename']}")
     print("Done.")
 
 
