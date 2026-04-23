@@ -1214,22 +1214,65 @@ with tab_rc:
                     yaxis_title="T2m anom (°C)", legend=dict(orientation="h"))
                 st.plotly_chart(fig_q5, use_container_width=True)
 
+            # Direct test of the panel's hypothesis: does the residual
+            # (what AO+NAO+PNA+ONI can't explain) covary with MJO activity?
+            residual_mjo_line = ""
+            if MJO_LOADED:
+                mjo_amp = (indices["mjo"]
+                           .reindex(_dt_idx, method="nearest",
+                                    tolerance=pd.Timedelta(days=1))["amplitude"])
+                pair = pd.DataFrame({
+                    "resid": pd.Series(residual, index=data.index),
+                    "mjo_amp": mjo_amp,
+                }).dropna()
+                if len(pair) >= 20:
+                    # Lag sweep 0..15d: MJO leads residual by `lag` days.
+                    best_r, best_lag = 0.0, 0
+                    for lag in range(0, 16):
+                        shifted = pair["mjo_amp"].shift(lag)
+                        common = pd.concat([pair["resid"], shifted],
+                                           axis=1).dropna()
+                        if len(common) < 20:
+                            continue
+                        r = float(common.iloc[:, 0].corr(common.iloc[:, 1]))
+                        if abs(r) > abs(best_r):
+                            best_r, best_lag = r, lag
+                    residual_mjo_line = (
+                        f" **Residual × MJO amplitude** (MJO leading by 0-15 d): "
+                        f"peak r = **{best_r:+.3f}** at lag +{best_lag} d "
+                        f"(n = {len(pair)} daily pairs). "
+                        "If the residual really encodes an MJO-driven signal, we'd "
+                        "expect a modest *negative* r (cold residuals coinciding "
+                        "with active MJO) at the 5-15-d lead range favored in the "
+                        "proposal — but with n this small and no multiple-testing "
+                        "correction across 16 lags, read this as exploratory."
+                    )
+
             st.markdown(
                 f"**Interpretation.** The four seasonal teleconnections "
                 f"({', '.join(k.upper() for k in X_cols)}) jointly explain "
                 f"**{r_sq*100:.1f}%** of daily FL T2m anomaly variance this winter "
                 f"(adjusted R² = {adj_r_sq*100:.1f}%). The remaining "
                 f"**{(1-r_sq)*100:.1f}%** is the residual time series plotted in blue "
-                f"— the part that seasonal modes *cannot* account for. If Tori's "
-                f"hypothesis holds, this residual should show structure around the "
-                f"cold-event windows identified in Q1 and should correlate with "
-                f"MJO phase at 5-15-day leads."
+                f"— the part that seasonal modes *cannot* account for." +
+                residual_mjo_line
             )
             st.caption(
-                "Caveat: OLS standard errors assume independent residuals, which is "
-                "false for autocorrelated daily data — the OLS p-values above are "
-                "anti-conservative. Treat significance as indicative; for "
-                "publication use Newey-West (HAC) SEs or a block bootstrap."
+                "**Method caveats.** "
+                "(1) OLS standard errors assume independent residuals, which is "
+                "false for autocorrelated daily temperature data — the OLS "
+                "p-values above are anti-conservative. Treat significance as "
+                "indicative; for publication use Newey-West (HAC) SEs or a "
+                "block bootstrap. "
+                "(2) ONI is a monthly index and is forward-filled to the daily "
+                "grid for this regression, so it contributes only 3-5 discrete "
+                "values over the winter window. Its β is effectively a "
+                "'DJF-vs-JFM-vs-FMA offset' rather than a day-to-day covariate, "
+                "and the La Niña state barely changed over the season. Do not "
+                "over-interpret the ONI coefficient. "
+                "(3) VIF is not displayed; AO-NAO share variance so their "
+                "individual coefficients can be unstable even when the joint "
+                "R² is stable."
             )
 
     # ===== Q2: Did MJO phases modulate Florida T2m? =====
