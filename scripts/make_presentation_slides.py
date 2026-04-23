@@ -775,6 +775,136 @@ def make_slide6():
                  "vmax_m": vmax}
 
 
+def make_slide7_summary():
+    """Slide 7 — text-only findings summary, designed for recall/exam memory."""
+    fig = plt.figure(figsize=(13.33, 7.5))
+    # Remove the usual axes; this slide is pure typography.
+    fig.patch.set_facecolor("white")
+
+    # Layout anchors, normalised figure coords.
+    left = 0.05
+    right = 0.97
+    top = 0.93
+    line_h = 0.065  # block spacing
+
+    fig.text(
+        left, top,
+        "Winter 2025-26 Florida cold wave — what we found",
+        fontsize=24, fontweight="bold", color="#111",
+        ha="left", va="top",
+    )
+    fig.text(
+        left, top - 0.05,
+        "A five-point summary; bolded numbers are the ones to memorise.",
+        fontsize=12, style="italic", color="#555",
+        ha="left", va="top",
+    )
+
+    def block(y, number, heading, body, color):
+        # Circular number marker
+        fig.text(
+            left, y,
+            f"{number}",
+            fontsize=22, fontweight="bold", color=color,
+            ha="left", va="top",
+        )
+        fig.text(
+            left + 0.035, y - 0.002,
+            heading,
+            fontsize=15, fontweight="bold", color="#111",
+            ha="left", va="top",
+        )
+        fig.text(
+            left + 0.035, y - 0.038,
+            body,
+            fontsize=12, color="#222",
+            ha="left", va="top",
+            wrap=True,
+        )
+
+    orange = "#d95f02"
+    blue = "#1f77b4"
+    gray = "#555"
+
+    y = top - 0.14
+    block(
+        y, "1", "WHAT HAPPENED",
+        ("Six distinct Florida cold outbreaks totalling 27 days below −2 °C "
+         "anomaly, peaking at −10.8 °C on 1 Feb 2026 during a 9-day event. "
+         "Not one continuous cold season — a sequence of discrete episodes."),
+        orange,
+    )
+
+    y -= line_h * 1.5
+    block(
+        y, "2", "SEASONAL TELECONNECTIONS ARE NOT ENOUGH",
+        ("OLS regression of daily FL T2m on AO + NAO + PNA + ONI gives  "
+         "R² = 0.15  (adjusted R² = 0.12, n = 120). "
+         "85 % of day-to-day variance — including every cold outbreak — is "
+         "unexplained by these four seasonal modes. Only PNA is individually "
+         "significant at α = 0.05 (β = −0.90 °C per 1 σ, p = 0.013)."),
+        orange,
+    )
+
+    y -= line_h * 1.9
+    block(
+        y, "3", "THE CIRCULATION WAS AO-NEGATIVE",
+        ("Monthly Z500 anomalies show anomalous ridging over the western "
+         "U.S. and troughing over the east — the canonical AO-negative "
+         "pattern (Thompson & Wallace 1998). The AO−-minus-AO+ composite of "
+         "T2m anomaly is significantly cold over 27 % of the CONUS grid "
+         "(two-sided Welch's t, α = 0.05)."),
+        blue,
+    )
+
+    y -= line_h * 1.9
+    block(
+        y, "4", "HYPOTHESIS UPDATE — MJO PHASE WINDOW IS 1-2, NOT 7-8",
+        ("The proposal expected MJO phases 7-8 at +5 to +15 d lead to drive "
+         "FL cold. The data show the cold signal is strongest at "
+         "phases 1-2 at lag +5 to +10 d (e.g. P2 @ +10 d: −2.3 °C, n = 25). "
+         "Phases 7-8 show neutral-to-warm anomalies. MJO still matters; the "
+         "specific phase window was wrong."),
+        blue,
+    )
+
+    y -= line_h * 2.0
+    block(
+        y, "5", "BOTTOM LINE",
+        ("A predominantly AO-negative winter with sub-seasonal MJO "
+         "modulation (phases 1-2 at ~10-day lead) overlaid on top. "
+         "Single seasonal indices explain little day-to-day variability; "
+         "the story is fundamentally sub-seasonal + interaction."),
+        gray,
+    )
+
+    # Footer: the five numbers for exam memory.
+    fig.text(
+        left, 0.05,
+        "Five numbers to memorise:   "
+        "R² = 0.15   ·   85 % unexplained   ·   −10.8 °C (1 Feb)   ·   "
+        "phases 1-2 @ +10 d   ·   27 % of CONUS significantly cold on AO−",
+        fontsize=11, fontweight="bold", color="#111",
+        ha="left", va="top",
+        bbox=dict(boxstyle="round,pad=0.6", facecolor="#fff6ec",
+                  edgecolor="#d95f02", linewidth=1.2),
+    )
+    fig.text(
+        left, 0.015,
+        "All statistics computed on winter 2025-26 (Nov 1 – Mar 31). "
+        "Sources: ERA5 reanalysis, NOAA CPC teleconnection indices, NOAA PSL "
+        "ROMI MJO index. Single-winter diagnostic; treat as descriptive, "
+        "not climatological.",
+        fontsize=9, style="italic", color="#555",
+        ha="left", va="bottom",
+    )
+
+    out = SLIDES / "slide7_summary.png"
+    fig.savefig(out, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
 if __name__ == "__main__":
     s1, events, n_winter = make_slide1()
     print(f"wrote {s1}  |  {len(events)} cold events over {n_winter} winter days")
@@ -800,3 +930,5 @@ if __name__ == "__main__":
         print(f"  lag+{lag:02d}d: {row}")
     s6, info6 = make_slide6()
     print(f"wrote {s6}  |  phase-7/8 lag panels (lag, n): {info6['panels']}")
+    s7 = make_slide7_summary()
+    print(f"wrote {s7}  |  summary (text-only)")
